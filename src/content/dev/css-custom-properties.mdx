@@ -1,0 +1,74 @@
+# CSS Custom Properties and Theming
+
+## Where I started
+
+To test dark mode, I ran `document.getElementById("root").setAttribute("data-mode", "dark")` and got a half-themed screen: some panels dark, the page behind them light, and the canvas HUD still fully light. All three had a different cause.
+
+## The setup
+
+Themes swap **custom properties** (CSS variables) under an attribute:
+
+```css
+:root {
+  --color-surface: white;
+  --hud-bg: var(--color-surface); /* component token built on a semantic one */
+}
+
+[data-mode="dark"] {
+  --color-surface: black;
+}
+```
+
+Custom properties **inherit**: every element below the one that sets them sees the value, unless something closer overrides it.
+
+## Problem 1: the override only reaches down
+
+Putting `data-mode` on `#root` overrides the variables for `#root` and its children. `<body>` and `<html>` sit **above** it, so they keep the light values. Anything they paint (like `body { background: var(--color-background) }`) stays light wherever the app doesn't cover the screen.
+
+## Problem 2: `var()` resolves where it's declared
+
+The surprising one. `--hud-bg: var(--color-surface)` is declared on `:root`, so the browser resolves it **there**, using `:root`'s light `--color-surface`. What children inherit is the **finished colour**, not the formula. Overriding `--color-surface` lower down doesn't recompute `--hud-bg`.
+
+So a theme switch on a subtree updates the base tokens there, but any token **built from** them on `:root` keeps its old value. That's why the components using `--color-*` directly went dark, while the ones using `--hud-*` didn't. Fixes:
+
+- set the mode on `<html>`, so the base tokens change at the same element where the derived ones are declared (simplest, and what most apps do),
+- or repeat the derived declarations in a selector that matches wherever the mode can be set.
+
+## Problem 3: canvas can't read CSS variables
+
+A `<canvas>` (Konva, charts) draws with JS colour strings, not CSS. `fill="var(--hud-bg)"` means nothing to it. You read the resolved value yourself:
+
+```ts
+getComputedStyle(document.documentElement).getPropertyValue("--hud-bg").trim();
+```
+
+That's a one-time read, so it also has to be **repeated when the theme changes**, for example with a `MutationObserver` watching `data-mode`:
+
+```ts
+const observer = new MutationObserver(() => setColors(readColors()));
+observer.observe(document.documentElement, {
+  attributes: true,
+  attributeFilter: ["data-mode"],
+});
+```
+
+Both read and watch `<html>`. A mode set anywhere else is invisible to this code.
+
+## Token layers
+
+The naming that keeps this manageable:
+
+- **Primitives:** raw values (`--color-steel-900`). Never used by components.
+- **Semantic:** meaning (`--color-surface`, `--color-negative`). Themes override these.
+- **Component:** one component's needs (`--hud-limit`), built from semantic ones.
+
+Changing the theme only touches the semantic layer, and everything above follows, as long as it's resolved in the right place (problem 2).
+
+## Takeaway
+
+Custom properties inherit downwards, and a `var()` inside one is resolved where it's declared, so children inherit the result, not the recipe. Put the theme attribute on `<html>`. Canvas code has to read variables through `getComputedStyle` and re-read them when the theme changes.
+
+## Open threads for next time
+
+- `@property` registered properties, which can be animated and type-checked.
+- `color-scheme` and how it affects built-in controls and scrollbars.

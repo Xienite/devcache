@@ -1,0 +1,98 @@
+# Singleton
+
+## Where I started
+
+The tandem lift app needs exactly one SignalR connection per tablet, shared by every feature that talks to the backend. The question was: just `export const connection = ...` from a module, or create it at startup and hand it down? The first option is what people call a singleton.
+
+## The definition
+
+A **singleton** is an object that:
+
+1. exists **exactly once** in the whole program, and
+2. is reachable from **anywhere**.
+
+Those are two separate promises, and keeping them apart is the key to the whole topic.
+
+## The classic OOP version
+
+In Java or C#, the textbook singleton is a class that stops you from creating it yourself:
+
+```ts
+class Connection {
+  private static instance: Connection | null = null;
+
+  private constructor() {} // `new Connection()` is now a compile error outside the class
+
+  static getInstance(): Connection {
+    if (Connection.instance === null) {
+      Connection.instance = new Connection();
+    }
+    return Connection.instance;
+  }
+}
+
+const a = Connection.getInstance();
+const b = Connection.getInstance();
+a === b; // true, same object
+```
+
+The instance is created **lazily**, on the first `getInstance()` call.
+
+## The JS version: modules already do it
+
+In JavaScript, I don't need any of that. An ES module is **evaluated once**, the first time something imports it, and the result is cached. Every later import gets the same exports:
+
+```ts
+// transport/connection.ts
+import { HubConnectionBuilder } from "@microsoft/signalr";
+
+export const connection = new HubConnectionBuilder()
+  .withUrl("/hubs/lift")
+  .withAutomaticReconnect()
+  .build();
+```
+
+```ts
+// anywhere else
+import { connection } from "@/transport/connection";
+```
+
+Every file that imports `connection` gets the **same object**. That's a singleton in one line. The difference from the class version is that it's created **eagerly**: the moment the module is first imported, not when someone first needs it.
+
+## Why singletons have a bad reputation
+
+Promise 1 (exactly one instance) is usually fine. Promise 2 (reachable from anywhere) causes the trouble:
+
+- **Hidden dependencies.** A component that imports `connection` directly doesn't show it in its props or signature. Reading the component's API, I can't tell it talks to the network.
+- **Hard to swap.** If ten files import the real connection, using a mock in tests or a demo means changing ten files, or mocking the module itself.
+- **Shared state between tests.** The module is cached, so one test can leave the connection in a state that leaks into the next.
+- **Import-time side effects.** Just importing the file creates (or starts) a connection, even in a test that never wanted one.
+
+## React-specific gotchas
+
+- **Hot reload (HMR).** When I edit the module in dev, Vite re-runs it, creating a *new* connection while the old one may still be open. Two connections, briefly.
+- **StrictMode.** In dev, React mounts components twice on purpose to surface bugs. If I create the connection inside a component's effect instead, I get create, tear down, create. That's one reason long-lived things like connections are created outside React, in the bootstrap.
+
+## The alternative: create once, pass it down
+
+Keep promise 1, drop promise 2. Create the one instance in the **composition root** (see the Bootstrap page) and hand it to whoever needs it:
+
+- through function parameters or constructor arguments (plain dependency injection), or
+- in React, through a **context** with a Provider near the top, read via a custom hook like `useConnection()`.
+
+There's still exactly one connection. What changes is *how others reach it*: it's passed in rather than grabbed from a global. Tests can wrap a component in a Provider holding a mock, and nothing else has to change.
+
+The backend does exactly this. `builder.Services.AddSingleton<...>()` in ASP.NET Core means "one instance for the whole app," but classes receive it through their constructor instead of looking it up globally. Same "single," no "global."
+
+## When a plain module singleton is fine
+
+- Small apps, prototypes, things that never need swapping.
+- Stateless helpers and constants. Those are singletons technically, but have no state to leak.
+
+## Takeaway
+
+A singleton means "exactly one" plus "reachable from anywhere." In JS, modules give me the first for free. The second is what makes singletons hard to test and swap, so the usual fix is to keep the single instance but create it at startup and pass it down.
+
+## Open threads for next time
+
+- Which option the tandem frontend actually goes with for the SignalR connection, and whether testing the role registration flow confirms the choice.

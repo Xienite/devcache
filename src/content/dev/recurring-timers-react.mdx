@@ -1,0 +1,100 @@
+# Recurring Timers in React
+
+## Where I started
+
+Working through `PollingSimulation` (the widget on the WebSocket page). The goal sounded simple: keep a value updating on a timer, with a random delay between ticks. Getting there took a frozen tab, a runaway re-render loop and a stale closure. The related background lives on other pages (Event Loop, Closures, Stale Closures in React, State Refs and Derived Values, useEffect); this page is about the timer loop itself.
+
+## Why `while (true)` + `setTimeout` froze the tab
+
+JS is single-threaded: only one thing runs on the main thread at a time. A `setTimeout` callback can only fire once the current synchronous code finishes and the call stack is empty.
+
+```js
+useEffect(() => {
+  while (true) {
+    setTimeout(() => setClientValue(serverValue), 200);
+  }
+});
+```
+
+`setTimeout` itself is non-blocking: it registers the callback and returns immediately. But the `while (true)` loop never pauses or returns; it just keeps calling `setTimeout` again, as fast as the CPU can execute, forever. Since the stack never empties, none of the millions of queued callbacks ever get a turn to run, and the browser can't repaint or process input. That's the freeze.
+
+**Takeaway:** a `while` loop is not how you "repeat something over time" in JS. Something async (a timer) has to be the thing that re-triggers the next step, not a synchronous loop wrapping it.
+
+## The recursive `setTimeout` pattern
+
+The fix for "repeat this with a delay, possibly a variable delay" is to have each timeout schedule the *next* one from inside its own callback:
+
+```js
+function loop() {
+  doSomething();
+  setTimeout(loop, delay); // schedules the next call, doesn't block
+}
+loop(); // kick off once
+```
+
+This lets the stack clear between each iteration. `setInterval` is the built-in shortcut for the same idea, but only for a *fixed* delay each time. Recursive `setTimeout` is needed when the delay itself varies per iteration (e.g. `generateDelay()` returning a random value).
+
+## The "ref indirection" pattern
+
+In a component, the loop function reads state, so it goes stale if the chain keeps calling the version from the first render. Instead of the recursive loop calling itself by name, it calls through a ref:
+
+```js
+const loopRef = useRef(() => {});
+
+loopRef.current = () => {
+  // this body is recreated every render (or whenever needed),
+  // so it always sees the freshest state
+  doSomething(latestState);
+  setTimeout(() => loopRef.current(), delay);
+};
+```
+
+The trick: `setTimeout(() => loopRef.current(), delay)` doesn't hard-code which specific closure to call later. It looks up whatever `loopRef.current` points to *at the moment the timer fires*. If something else keeps overwriting `.current` with a fresher version in between, the recursive chain automatically picks up the newest one, breaking the staleness problem without needing to restart the whole chain.
+
+(Writing `loopRef.current = ...` directly in the component body like above is a write during render, which React flags. The assignment has to move into an effect; see the next section.)
+
+## Splitting "redefine" from "invoke" into separate effects
+
+Ended up needing **three** effects total for the two loops:
+
+- `serverLoopRef`: one effect, `[]` deps. Its function doesn't depend on any reactive state (just calls pure helper functions), so define-and-invoke-once together is fine.
+- `clientLoopRef` define: `[serverValue]` deps. *Only* rewrites `.current`, rerunning whenever `serverValue` changes to keep the closure fresh. No invocation here.
+- `clientLoopRef` invoke: `[]` deps. *Only* calls `.current()`, once, to kick off the recursive chain.
+
+Why split "define" and "invoke" for the client loop specifically: they need different triggers. Redefinition should happen every time the source data changes; invocation should happen exactly once, ever. Mixing them (e.g. adding `serverValue` as a dep on an effect that also calls `.current()`) causes a *new* parallel timer chain to spawn on every server tick, since the invocation line reruns right along with the redefinition.
+
+**Effect declaration order matters on mount:** React runs effects in the order they're declared, after each render. The "redefine" effect must run before the "invoke" effect on mount, otherwise `.current()` would be called while it's still the placeholder `() => {}` from `useRef(() => {})`.
+
+## Cleaning up a timer chain
+
+Returning an empty function (`() => {}`) from an effect satisfies React's "did you return a function" check but does nothing. Cleanup has to actually *do* something, not just exist.
+
+For a recursive timer chain, cleanup needs to cancel whichever timeout is currently outstanding. Since a new `setTimeout` gets scheduled on every iteration (with a new ID each time), a single captured ID from the first call isn't enough. The *same* ref pattern solves this: store the latest timeout ID in a ref, overwritten every iteration, and have the cleanup read it.
+
+```js
+const timeoutIdRef = useRef();
+
+// inside the loop
+timeoutIdRef.current = setTimeout(() => loopRef.current(), delay);
+
+// in the invoking effect
+return () => clearTimeout(timeoutIdRef.current);
+```
+
+Because it reads `.current` at the moment cleanup actually runs, it always cancels whatever the most recently scheduled timer is.
+
+This matters most in practice with React's `StrictMode`, which deliberately mounts → unmounts → remounts once in development specifically to catch missing or broken cleanup. Without it, you get two timer chains running side by side.
+
+## Editing while it runs: hot reload
+
+With the dev server running, I changed a value in a mock feed file and saved, and nothing changed until I refreshed the page.
+
+Hot reload (Vite's HMR plus React Fast Refresh) swaps in the new **module code**. A timer that's already running is a callback from the **old** module, with the old values in its closure. It keeps ticking until something stops it and starts the new version, and that only happens if React re-runs the effect that started it. Edits to component code update reliably; edits to a plain `.ts` file that a running timer comes from often don't.
+
+So for timers, subscriptions and animation loops, a page refresh is the dependable way to restart them with new code. It's not a bug in your code.
+
+A related trap: Fast Refresh can only hot-swap a file that **exports only components**. Exporting a constant from a component file (`export const RATIO = 0.2` next to `export function Hud()`) makes Vite fall back to a full page reload whenever that file changes. Put shared constants in their own file. The `react-refresh/only-export-components` lint rule catches this, if the project has it enabled.
+
+## Takeaway
+
+Repeat over time with a timer that schedules the next one, never with a synchronous loop. In React, call the loop through a ref so it always runs the freshest version, keep "redefine" and "start" in separate effects, and keep the latest timeout ID in a ref so cleanup can cancel it.

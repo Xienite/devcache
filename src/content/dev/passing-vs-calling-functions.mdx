@@ -1,0 +1,241 @@
+# Passing vs Calling a Function
+
+## Where I started
+
+Writing a `sleep` for a retry loop, I wrote:
+
+```ts
+setTimeout(resolve(), 3000);
+```
+
+TypeScript complained: *"Argument of type 'void' is not assignable to parameter of type 'TimerHandler'."* The fix was `setTimeout(() => resolve(), 3000)`, and then I was told it could also just be `setTimeout(resolve, 3000)`.
+
+So sometimes I pass the function directly, sometimes I wrap it in `() => ...`, and sometimes writing `()` is the bug. This page sorts out when to use which.
+
+## The one rule
+
+**`fn` is the function. `fn()` runs the function, right now, and gives back its result.**
+
+```ts
+function getFive() {
+  return 5;
+}
+
+const a = getFive; // a is the function itself
+const b = getFive(); // b is 5
+
+a(); // 5, because a is a function I can call later
+b(); // TypeError: b is not a function, because it's just 5
+```
+
+Functions are **values** in JS, like numbers or strings. Writing the name without `()` refers to that value. The parentheses are the operator that *calls* it.
+
+So whenever I'm about to write `fn()` as an argument, the question is: **do I want to hand over the function, or what it returns?**
+
+## Why `setTimeout(resolve(), 3000)` is wrong
+
+`setTimeout` wants a **function to call later**. Walk through what JS does with my version:
+
+1. Evaluate the arguments first. `resolve()` is a call, so it runs **now**, during setup, not after 3 seconds.
+2. `resolve` returns nothing, so the expression `resolve()` becomes `undefined` (`void` in TS).
+3. `setTimeout(undefined, 3000)`: there's no function to call later.
+
+The TS error said exactly that: I passed a `void` where a function (`TimerHandler`) was expected. **When TS says "`void` is not assignable to" some function type, it almost always means I wrote `()` where I meant to pass the function.**
+
+## The three forms
+
+```ts
+setTimeout(resolve, 3000); // 1. pass the function itself
+setTimeout(() => resolve(), 3000); // 2. pass a new function that calls it
+setTimeout(resolve(), 3000); // 3. call it now and pass the result (wrong here)
+```
+
+Forms 1 and 2 both hand `setTimeout` a function, and both work. Form 2 just adds a wrapper: a tiny new function whose only job is to call `resolve`. When the wrapper adds nothing, form 1 is shorter.
+
+## The same thing in React
+
+```tsx
+<Button onClick={handleClick} /> // passes the function: runs on click
+<Button onClick={handleClick()} /> // calls it during render: runs immediately, every render
+<Button onClick={() => setRole("Crane1")} /> // wrapper: runs on click, with my argument
+```
+
+Same rule, same bug. `onClick={handleClick()}` runs during render and hands React the result.
+
+It also applies to `useState`'s initial value: `useState(expensive())` runs `expensive` on every render, while `useState(expensive)` or `useState(() => expensive(arg))` runs it only once (see Lazy initial state in State, Refs and Derived Values).
+
+## So when do I *need* the wrapper?
+
+Passing directly only works if **the caller calls my function exactly the way I want it called**. The wrapper is needed whenever that's not true. Four cases:
+
+### 1. I need to supply the arguments
+
+```tsx
+<Button onClick={() => setRole("Crane1")} />
+```
+
+I can't write `onClick={setRole("Crane1")}`. That calls `setRole` during render (form 3 again). The wrapper is how I say "later, call it **with this argument**."
+
+### 2. The caller passes arguments I don't want
+
+A caller passes *its own* arguments to whatever I give it. If I pass my function directly, it receives them, wanted or not.
+
+```js
+["1", "2", "3"].map(parseInt); // [1, NaN, NaN]
+["1", "2", "3"].map((s) => parseInt(s)); // [1, 2, 3]
+```
+
+`map` calls its callback with `(element, index, array)`. `parseInt` has a second parameter, the radix, so passed directly it gets `parseInt("2", 1)` and `parseInt("3", 2)`, which is nonsense. The wrapper decides exactly what gets passed through.
+
+React version of the same trap:
+
+```tsx
+<Button onClick={setOpen} /> // setOpen receives the click event object as the new state!
+<Button onClick={() => setOpen(true)} /> // correct
+```
+
+### 3. I want to do more than one thing
+
+```tsx
+<Button
+  onClick={() => {
+    setRole("Crane1");
+    close();
+  }}
+/>
+```
+
+One function slot, two actions: wrap them.
+
+### 4. It's a method that uses `this`
+
+The rule behind this case: **`this` is decided by the call, not by where the function was defined.** The object before the dot becomes `this`:
+
+```js
+c.increment(); // `this` = c, because c is before the dot
+```
+
+Take the method off the object, and it forgets `c`. Functions don't remember which object they came from:
+
+```js
+class Counter {
+  count = 0;
+  increment() {
+    this.count++;
+  }
+}
+
+const c = new Counter();
+
+const f = c.increment; // just the function, no object attached
+f(); // TypeError: Cannot read properties of undefined (reading 'count')
+```
+
+With no dot, `this` is `undefined`, so at least it crashes. Passing the method as a callback is worse, because then **whoever calls it decides what `this` is**:
+
+```js
+setTimeout(c.increment, 1000);
+// no error! setTimeout calls it with its own `this` (a Timeout object in Node, `window` in the browser).
+// this.count++ writes NaN onto THAT object. c.count stays 0.
+
+setTimeout(() => c.increment(), 1000); // works: the wrapper calls it with the dot again
+```
+
+#### A real case: SignalR
+
+In the tandem lift `HubService`, I registered a status method directly:
+
+```ts
+this.connection.onreconnecting(this.onReconnecting);
+
+private onReconnecting(): void {
+  this.status = "Reconnecting";
+}
+```
+
+SignalR stores the callback and later calls it like this (`HubConnection.js` in `@microsoft/signalr`):
+
+```js
+this._reconnectingCallbacks.forEach((c) => c.apply(this, [error]));
+```
+
+`apply(this, ...)` means "call `c`, using *my* `this`." Inside the library, `this` is the `HubConnection`. So `this.status = "Reconnecting"` quietly created a new `status` property **on SignalR's connection object**. My service's setter never ran, no subscriber was notified, and nothing crashed. TypeScript didn't complain either, because the function's parameter types matched.
+
+#### Why the arrow wrapper fixes it
+
+```ts
+this.connection.onreconnecting(() => this.onReconnecting());
+```
+
+1. Inside the wrapper, `this.onReconnecting()` is called **with the dot again**.
+2. **Arrow functions don't have their own `this`.** They use the `this` of the place they were *written*. Written inside the constructor, that's the service. So it doesn't matter how SignalR calls the wrapper, `apply` or not.
+
+That's the key difference: regular functions and methods get `this` from the call, and arrow functions get it from where they're written.
+
+#### Three versions that all compile
+
+```ts
+onclose(this.onClose); // runs onClose, but `this` is wrong: silent bug
+onclose(() => this.onClose); // returns onClose, never runs it: silent bug
+onclose(() => this.onClose()); // runs onClose with the right `this` ✓
+```
+
+The middle one is a function that *returns* the method instead of calling it. SignalR ignores callback return values, so `onClose` simply never runs. TypeScript allows it because the callback type returns `void`, and a function returning *something* is accepted where a `void` return is expected (see the TypeScript Generics page).
+
+All three type-check, so for methods passed as callbacks, the compiler won't save me. The habit: **when passing a method that uses `this`, always wrap it as `() => this.method()`**.
+
+#### Built-in methods check `this` themselves
+
+Many methods built into the browser need `this` to be one specific kind of object, and **they check**. In a test, I replaced the global `crypto` with a fake that reused the real `getRandomValues`:
+
+```ts
+const fake = { getRandomValues: crypto.getRandomValues };
+vi.stubGlobal("crypto", fake);
+
+crypto.getRandomValues(new Uint8Array(16));
+// TypeError: Value of "this" must be of type Crypto
+```
+
+The code calls `crypto.getRandomValues(...)`, but `crypto` is now my fake, so the object before the dot (and therefore `this`) is a plain object. The real method notices and refuses. The browser's version of the same error is "Illegal invocation".
+
+My own methods would silently use the wrong `this`. Built-in ones fail loudly instead, which is easier to debug, but it's the same rule.
+
+The fix is `bind`, which makes a copy of the function with `this` fixed permanently, however it's called later:
+
+```ts
+const fake = { getRandomValues: crypto.getRandomValues.bind(crypto) };
+```
+
+The same happens when passing built-ins around directly, for example `const log = console.log` works in modern browsers, but `const get = map.get; get("key")` throws, because `this` is no longer the `Map`.
+
+## When passing directly is fine
+
+When **all** of these hold:
+
+- I don't need to supply arguments,
+- whatever the caller passes in is fine for my function (or it ignores them),
+- it's not a method that relies on `this`,
+- I only want to do that one thing.
+
+`setTimeout(resolve, 3000)` meets all four: `setTimeout` calls it with no arguments, `resolve` doesn't use `this`, and resolving is the only thing to do. So the wrapper in `() => resolve()` adds nothing.
+
+## Returning a function, not calling it
+
+The same rule shows up in `return`:
+
+```ts
+return handlers.delete(handler); // deletes NOW, returns true/false
+return () => handlers.delete(handler); // returns a function that deletes LATER
+```
+
+The `() =>` is the difference between doing something and handing someone the ability to do it later. That's how an unsubscribe function works, and why a React `useEffect` cleanup is written as `return () => ...`.
+
+## Quick check before writing `()`
+
+1. Does this slot want a **function** (callback, handler, cleanup) or a **value**?
+2. If it wants a function: can I pass mine as-is (see the four conditions above), or do I need a wrapper?
+3. If I wrote `fn()` in a function slot: that's the bug.
+
+## Takeaway
+
+`fn` is the function, and `fn()` is its result, right now. Callbacks want the function. Pass it directly when the caller will call it exactly how I'd want, and wrap it in `() => ...` when I need to control the arguments, keep `this`, or do more than one thing.

@@ -1,0 +1,124 @@
+# Context for Component Composition
+
+## Where I started
+
+A design system had a `Field` component: a label, a control, and optional help text and error message. Accessibility requires the control to be linked to all of these, with matching `id`s and `aria` attributes. Writing them by hand on every form field is tedious and easy to get wrong:
+
+```tsx
+<label htmlFor="email">Email</label>
+<input id="email" aria-describedby="email-help email-error" aria-invalid="true" />
+<p id="email-help">We'll never share it.</p>
+<p id="email-error">Enter a valid address.</p>
+```
+
+I wanted to write this instead, and have the input wire itself up:
+
+```tsx
+<Field label="Email" description="We'll never share it." error="Enter a valid address.">
+  <Input />
+</Field>
+```
+
+## Compound components
+
+Components designed to be used together, where the parent shares information with its children, are called **compound components**. `select` and `option` in HTML work this way. So do `Tabs` and `Tab`, `Accordion` and `AccordionItem`, or `Field` and `Input`.
+
+The question is how the parent passes information to children it doesn't render itself.
+
+## The old way: `cloneElement`
+
+```tsx
+function Field({ children, id }) {
+  return React.Children.map(children, (child) =>
+    React.cloneElement(child, { id, "aria-invalid": true }),
+  );
+}
+```
+
+The parent copies each child with extra props added. It breaks easily:
+
+- **Only direct children get the props.** Put the input inside a `div` (to place a button next to it, say) and the `div` gets the props instead.
+- **Props can collide** with ones the user passed.
+- **It's hard to type**, and React's docs recommend against it.
+
+## The context way
+
+The parent **provides** a value, and any component inside it, however deep, can **read** it.
+
+```tsx
+type FieldContextValue = {
+  id: string;
+  invalid: boolean;
+  describedBy?: string;
+};
+
+const FieldContext = createContext<FieldContextValue | null>(null);
+
+function Field({ label, error, children }) {
+  const id = useId();
+  const errorId = `${id}-error`;
+
+  return (
+    <FieldContext value={{ id, invalid: !!error, describedBy: error ? errorId : undefined }}>
+      <label htmlFor={id}>{label}</label>
+      {children}
+      {error && <p id={errorId}>{error}</p>}
+    </FieldContext>
+  );
+}
+```
+
+In React 19, a context can be rendered directly as `<FieldContext value=...>`. Older versions write `<FieldContext.Provider value=...>`.
+
+The control reads it:
+
+```tsx
+function Input(props) {
+  const field = useContext(FieldContext);
+  return (
+    <input
+      {...props}
+      id={props.id ?? field?.id}
+      aria-invalid={props["aria-invalid"] ?? (field?.invalid || undefined)}
+      aria-describedby={props["aria-describedby"] ?? field?.describedBy}
+    />
+  );
+}
+```
+
+Now there can be any number of wrappers between `Field` and `Input`:
+
+```tsx
+<Field label="Crane 1 ID" error={error}>
+  <div className="flex gap-2">
+    <Input />
+    <Button>Verify</Button>
+  </div>
+</Field>
+```
+
+Context skips the `div` entirely. The input still gets its id and attributes.
+
+`useId` generates an id that's unique within the app and stable between server and client rendering, which is exactly what label and `aria` links need.
+
+## Details worth copying
+
+**Explicit props win.** `props.id ?? field?.id` means "use the id the developer passed, and only fall back to the field's". The component helps by default but never takes control away.
+
+**Work without a provider.** The default value is `null`, and every read uses `field?.`. An `Input` outside any `Field` still works as a plain input.
+
+**Share the merging logic.** If several controls (input, select, checkbox) read the same context, put the merging in one small hook they all call, so the rules are the same everywhere.
+
+**One prop for one idea.** Separate `error`, `success` and `pending` props can be passed together and contradict each other. A single prop like `validationMessage: { type: "positive" | "negative"; message: string }` makes impossible combinations impossible to write.
+
+## The cost: re-renders
+
+Every component reading a context re-renders when the provided value changes. Writing `value={{ ... }}` creates a new object on every render of the provider, so all readers re-render with it. For a small `Field` that's irrelevant. For a context near the top of a large app, keep the value stable with `useMemo`, or split rarely-changing and often-changing data into separate contexts.
+
+## Takeaway
+
+Compound components share information from a parent to the pieces inside it. Context does this at any depth, unlike `cloneElement`, which only reaches direct children and breaks when you add a wrapper. Let explicit props override the context, and make the components work without a provider.
+
+## Open threads for next time
+
+- How libraries like Radix structure compound components (`Dialog.Root`, `Dialog.Trigger`, `Dialog.Content`).

@@ -1,0 +1,47 @@
+import PollingSimulation from "../../components/PollingSimulation";
+
+# WebSocket
+
+## Motivation
+
+By now, you should be comfortable with the idea of HTTP, and its applications in web engineering. However, as great as it may be, it cannot cover all circumstances optimally. One of these circumstances is what WebSocket tries to cover.
+
+Imagine a user interface that projects the current trajectory of a robotic arm. The server receives this trajectory information from the arm at irregular intervals, spanning from one to three seconds. Now, with our current HTTP knowledge, there's an obvious and simple solution: regularly poll the server with HTTP requests. But as we know, simple and obvious, doesn't always mean efficient and best.
+
+Take a look at the simulation below of a system implementing a regular polling interval:
+
+<PollingSimulation/>
+
+Fews things to note (complete later):
+- Server work.
+- Client work.
+- Delays.
+- Bandwidth.
+
+## The Solution
+
+While HTTP relies on a client being proactive, and the server consequently reactive, WebSocket eliminates this narrative. 
+No one likes a one-sided conversation, well at least when you have something to say. Think of WebSocket as a solution which enables having a genuine, two-sided conversation. 
+
+
+While being separate protocol, using WebSocket always starts off with HTTP. A client sends a GET request, informing the server to switch protocols:
+
+```
+GET /ws HTTP/1.1
+Host: example.com
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+Sec-WebSocket-Version: 13
+```
+
+To which the server responds:
+
+```
+HTTP/1.1 101 Switching Protocols
+Upgrade: websocket
+Connection: Upgrade
+Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+```
+
+(Insert WebSocket Simulation Component)

@@ -1,0 +1,54 @@
+@import url("https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300;1,400;1,500&family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap");
+@import "tailwindcss";
+
+@theme {
+  --font-default: "DM Sans", sans-serif;
+  --font-mono:
+    "DM Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --color-background: #0a0a0a;
+  --color-foreground: #fafafa;
+  --color-primary: #22c55e;
+  --color-primary-foreground: #0a0a0a;
+  --color-muted: #18181b;
+  --color-muted-foreground: #a1a1aa;
+  --color-border: #27272a;
+
+  --spacing-page-padding: 2rem;
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+}
+
+/*#PollingBar {
+  width: 100%;
+  transition: width 2s ease-in-out;
+}*/
+
+/* MARKDOWN FORMATTING */
+
+/*h1 {
+  font-size: var(--text-8xl);
+  font-family: var(--font-default);
+  font-weight: 600;
+}*/
+
+/*code {
+  background-color: var(--color-muted);
+}*/
+
+/*ol {
+  list-style: decimal;
+}
+
+ul {
+  list-style: initial;
+  list-style-position:inside;
+}
+
+p {
+  font-size: 1rem;
+}*/
+
+

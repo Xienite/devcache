@@ -1,0 +1,300 @@
+# TypeScript Generics, keyof and Friends
+
+## Where I started
+
+Building the SignalR service for the tandem lift app, I had a `subscribe` method typed like this:
+
+```ts
+subscribe(event: keyof ILiftHubReceiver, handler: Function)
+```
+
+It compiled, but it checked almost nothing. `subscribe("deviceRegistered", (x: number) => ...)` was accepted even though the role arrives as a `string`. The two parameters had no connection to each other. What I wanted to say was: **the event name I pass decides what the handler receives.** That link between parameters is what generics are for.
+
+`K extends keyof`, `Parameters<...>` and friends were where I was completely out of my depth, so this page builds them up one tool at a time and then combines them.
+
+All examples use this type:
+
+```ts
+type Settings = {
+  volume: number;
+  theme: "light" | "dark";
+  username: string;
+};
+```
+
+## Tool 1: `keyof`, the key names as a type
+
+```ts
+type SettingKey = keyof Settings; // "volume" | "theme" | "username"
+```
+
+`keyof` turns an object type into a **union of its key names**. The result is a type, so it can be used anywhere a type goes:
+
+```ts
+function reset(key: keyof Settings) { ... }
+
+reset("volume"); // ok
+reset("colour"); // error: not a key of Settings
+```
+
+## Tool 2: indexed access, a property's type
+
+```ts
+type Volume = Settings["volume"]; // number
+type Theme = Settings["theme"]; // "light" | "dark"
+```
+
+The same square brackets as reading a property in JS (`settings["volume"]`), but at the **type** level. It means "the type of the property `volume`," not its value.
+
+## Tool 3: generics, variables for types
+
+A normal parameter is a placeholder for a **value**, filled in when the function is called. A **type parameter** (`<T>`) is a placeholder for a **type**, also filled in at the call, usually **inferred** from the arguments:
+
+```ts
+function first<T>(items: T[]): T {
+  return items[0];
+}
+
+first([1, 2, 3]); // T = number → returns number
+first(["a", "b"]); // T = string → returns string
+```
+
+The point is that `T` appears **twice**, in the parameter and in the return type. That's what **links** them: whatever `T` turns out to be, both places agree. Without the generic I'd write `any[]` → `any` and lose the connection entirely.
+
+## Tool 4: constraints, `extends`
+
+Sometimes a type parameter can't be just anything:
+
+```ts
+function getSetting<K extends keyof Settings>(key: K) { ... }
+```
+
+`K extends keyof Settings` means "`K` must be one of the setting keys."
+
+**`extends` here is not inheritance** like in a class. Inside `< >`, read it as **"must fit into"**, or "is a subset of." `"volume"` fits into `"volume" | "theme" | "username"`, and `"colour"` doesn't.
+
+## Tool 5: tuples, arrays that know each position
+
+JavaScript has no tuples. A tuple is **purely a TypeScript type**, and at runtime it's a normal array. The type knows the **exact length** and **the type at each position**:
+
+```ts
+const a: string[] = ["x", "y", "z"]; // any length, every element a string
+const b: [string, number] = ["x", 42]; // exactly 2: position 0 string, position 1 number
+
+b[0]; // string
+b[1]; // number
+b[2]; // error: no element at index 2
+```
+
+I'd been using one all along without knowing it. `useState` returns a tuple:
+
+```ts
+const [role, setRole] = useState<DeviceRole | null>(null);
+// [DeviceRole | null, Dispatch<SetStateAction<DeviceRole | null>>]
+```
+
+That's how TS knows `role` is the value and `setRole` is the setter. With a plain array type, both would be typed as "value or setter" and neither would be usable safely.
+
+Tuple elements can have **labels**, which are documentation only: `[name: string, times: number]` behaves exactly like `[string, number]`.
+
+## Tool 6: `Parameters` and `ReturnType`
+
+Built-in **utility types** that take a function type apart:
+
+```ts
+type Greet = (name: string, times: number) => string;
+
+type GreetArgs = Parameters<Greet>; // [name: string, times: number]
+type GreetResult = ReturnType<Greet>; // string
+```
+
+`Parameters` returns a **tuple**, because a parameter list *is* "a fixed number of things, each with its own type, in order."
+
+## Tool 7: rest parameters with a tuple
+
+A tuple can be turned back into a parameter list with **rest parameters** (`...args`):
+
+```ts
+type GreetLogger = (...args: GreetArgs) => void;
+// same as: (name: string, times: number) => void
+```
+
+`...args` collects all arguments into an array, and typing that array as a tuple tells TS exactly how many arguments there are and what each one is.
+
+## Combinations
+
+The tools get powerful when combined. From simplest to the full thing:
+
+### keyof + indexed access: every possible value type
+
+```ts
+type AnySettingValue = Settings[keyof Settings];
+// number | "light" | "dark" | string
+```
+
+Indexing with a **union** of keys gives a **union** of their value types.
+
+### Generic + constraint: only valid keys, exact key remembered
+
+```ts
+function getSetting<K extends keyof Settings>(key: K) { ... }
+
+getSetting("volume"); // K = "volume" (the exact literal, not the whole union)
+```
+
+Unlike Tool 1's `reset(key: keyof Settings)`, the generic **remembers which key** was passed. That's what makes the next step possible.
+
+### Generic + constraint + indexed access: the argument decides the return type
+
+```ts
+function getSetting<K extends keyof Settings>(key: K): Settings[K] {
+  return settings[key];
+}
+
+getSetting("volume"); // returns number
+getSetting("theme"); // returns "light" | "dark"
+```
+
+Walk through it: I pass `"volume"`, TS infers `K = "volume"`, and the return type becomes `Settings["volume"]`, which is `number`. **The value of one argument decides another type in the signature.** This is the whole trick.
+
+### Two linked parameters
+
+The same idea, but linking two parameters instead of a parameter and a return type:
+
+```ts
+function setSetting<K extends keyof Settings>(key: K, value: Settings[K]) { ... }
+
+setSetting("theme", "dark"); // ok
+setSetting("volume", "loud"); // error: "loud" is not a number
+```
+
+`K` is inferred from the first argument and then constrains the second. This is exactly the shape my `subscribe` needed.
+
+### Parameters + rest: a function with the same arguments as another
+
+```ts
+type Events = {
+  login: (user: string) => void;
+  tick: (count: number, at: Date) => void;
+};
+
+type TickHandler = (...args: Parameters<Events["tick"]>) => void;
+// (count: number, at: Date) => void
+```
+
+Indexed access picks the function type, `Parameters` pulls out its arguments as a tuple, and rest parameters build a new function type from them.
+
+### Everything together
+
+```ts
+function on<K extends keyof Events>(
+  event: K,
+  handler: (...args: Parameters<Events[K]>) => void,
+): () => void { ... }
+
+on("tick", (count, at) => { ... }); // count: number, at: Date, inferred
+on("login", (user: number) => { ... }); // error: user is a string
+```
+
+Read it inside out:
+1. `K extends keyof Events`: the event name, one of `"login" | "tick"`.
+2. `Events[K]`: that event's function type.
+3. `Parameters<Events[K]>`: its arguments, as a tuple.
+4. `(...args: ...) => void`: a handler that takes those arguments.
+
+## The real thing: my `subscribe`
+
+```ts
+subscribe<K extends keyof ILiftHubReceiver>(
+  event: K,
+  handler: (...args: Parameters<ILiftHubReceiver[K]>) => void,
+): () => void
+```
+
+Tested against the real contract:
+
+```ts
+subscribe("deviceRegistered", (role) => ...); // role inferred as string
+subscribe("deviceRegistered", (role: number) => ...); // error
+subscribe("nope", () => ...); // error: not an event name
+```
+
+Two details worth remembering:
+
+- The handler returns `void`, while the interface methods return `Promise<void>`. So subscribers don't need to be `async`.
+- The return type `() => void` describes the contract ("call this to unsubscribe") rather than the implementation. The closure actually returns `Set.delete`'s boolean, and TS allows that, because a function returning *something* is assignable to a `() => void` type. Writing `() => boolean` would leak the fact that a `Set` is used inside.
+
+## A limit I hit: the Map inside
+
+The public `subscribe` is fully typed, but its private storage can't be:
+
+```ts
+private subs = new Map<keyof ILiftHubReceiver, Set<Function>>();
+```
+
+`Map<K, V>` has **one** value type for all keys. It can't express "the `Set` under `deviceRegistered` holds `string` handlers, the one under `telemetryUpdated` holds telemetry handlers." The common answer is **strict at the public boundary, looser inside**: callers get full checking, and the private storage uses a broader type. That's a known, accepted trade-off, not something to fight.
+
+## Same keys, new values: `Record<keyof T, ...>`
+
+Later, in the tandem lift HUD, I wrote a hook that turns CSS token names into the colours the browser resolves them to:
+
+```ts
+useCssTokens({ ok: "--hud-ok", warn: "--hud-warn" });
+// in:  { ok: "--hud-ok", warn: "--hud-warn" }
+// out: { ok: "#22c55e", warn: "#f59e0b" }
+```
+
+Any object of strings should work, so the input is a generic with a constraint:
+
+```ts
+function useCssTokens<T extends Record<string, string>>(tokens: T)
+```
+
+`T extends Record<string, string>` reads as "`T` is some object whose values are all strings". `T` itself is still the **exact** type of the object passed in, keys included. The constraint only sets a minimum, it doesn't replace `T`.
+
+For the return type, the question is: **what do the input and output have in common?** The keys are the same, and the values are different (token names in, colours out). So keep `T`'s keys and give them a new value type:
+
+```ts
+function useCssTokens<T extends Record<string, string>>(
+  tokens: T,
+): Record<keyof T, string>
+```
+
+`Record<Keys, Value>` builds an object type from a set of keys and one value type, and `keyof T` supplies the caller's keys. The caller gets autocomplete on `c.ok`, and `c.nope` is an error.
+
+### Why not just return `T`?
+
+Returning `T` keeps the keys too, and in most calls it gives the same type. The difference is the **values**: `T` remembers everything about the input, and its value types can be narrower than `string`.
+
+```ts
+useCssTokens({ ok: "--hud-ok" });
+// T = { ok: string }: object literal values are widened, so returning T happens to be fine
+
+const HUD_TOKENS = { ok: "--hud-ok" } as const;
+useCssTokens(HUD_TOKENS);
+// T = { readonly ok: "--hud-ok" }: returning T would claim c.ok is the token name itself
+```
+
+With `as const` (or a `<const T>` type parameter), returning `T` says the hook returns `"--hud-ok"`, which is false at runtime. `Record<keyof T, string>` is true for every valid call. A signature should be correct for **all** the ways it can be called, not only the way I happen to call it today. It also documents the intent: same keys, new values.
+
+The same idea appears whenever a function transforms an object's values but keeps its shape, for example `mapValues`, a form's "errors per field" object, or a lookup from status to colour.
+
+## How to read a scary signature
+
+When a type looks like line noise, read it from the inside out, one tool at a time, and name each piece:
+
+- `<K extends X>`: a type variable that must fit into `X`.
+- `X[K]`: the type of property `K` on `X`.
+- `Parameters<F>` / `ReturnType<F>`: take a function type apart.
+- `(...args: T) => R`: build a function type from a tuple.
+
+Hovering in the editor helps too: TS shows what each piece resolves to for a concrete call.
+
+## Takeaway
+
+A generic is a variable for a type, and its job is to **link** types across a signature. `keyof` and indexed access let that link run through an object type's keys and values, and `Parameters` plus rest parameters let it run through a function's arguments.
+
+## Open threads for next time
+
+- More utility types (`Partial`, `Pick`, `Omit`) in real code. `Record` is covered above.
+- Mapped types (`{ [K in keyof T]: ... }`): the tool that *could* type the Map's insides. `Record<keyof T, string>` is a small mapped type under the hood, and writing it out by hand would let each key keep its own value type.

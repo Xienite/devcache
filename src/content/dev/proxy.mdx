@@ -1,0 +1,184 @@
+# Proxy
+
+## Where I started
+
+In the tandem lift frontend, `HubService` receives server messages through SignalR. The generated `ILiftHubReceiver` type lists every message the server can send, and my class promised to handle all of them:
+
+```ts
+class HubService implements LiftConnection, ILiftHubReceiver {
+  async deviceRegistered(role: string) {
+    this.subs.get("deviceRegistered")?.forEach((fn) => fn(role));
+  }
+
+  async telemetryUpdated(telemetry: ComputedCraneTelemetry) {
+    this.subs.get("telemetryUpdated")?.forEach((fn) => fn(telemetry));
+  }
+
+  // ...one of these per message
+}
+```
+
+Then the backend added two new messages, the types were regenerated, and the frontend build failed: `Class 'HubService' incorrectly implements interface 'ILiftHubReceiver'`. Every new message meant writing another copy of the same three lines.
+
+All those methods do the same thing: *find the subscribers for this name and hand them the data*. Only the name changes. I wanted **one object that answers to any method name**. That's what a `Proxy` is for.
+
+## What a Proxy is
+
+A `Proxy` is a stand-in for an object. Normally, reading `obj.foo` just looks up `foo`. With a Proxy, **I get to decide what happens** when someone reads, writes or calls something on it.
+
+```ts
+const proxy = new Proxy(target, handler);
+```
+
+- **`target`**: the real object behind the stand-in. Anything I don't intercept goes through to it. It can be an empty `{}` if I handle everything myself.
+- **`handler`**: an object with **traps**, functions named after the operation they intercept (`get`, `set`, `has`, ...).
+
+## The `get` trap
+
+`get` runs whenever **any** property is read, including ones that don't exist:
+
+```ts
+const catchAll = new Proxy(
+  {},
+  {
+    get(_target, name) {
+      return `you asked for ${String(name)}`;
+    },
+  },
+);
+
+catchAll.hello; // "you asked for hello"
+catchAll.anythingAtAll; // "you asked for anythingAtAll"
+```
+
+`get` receives three arguments, decided by JavaScript, not by me:
+
+1. **`target`**: the object passed to `new Proxy`.
+2. **`name`**: the property being read. Its type is `string | symbol`, because property keys can be symbols too.
+3. **`receiver`**: the proxy itself (usually not needed).
+
+Whatever `get` returns is the value of `catchAll.hello`.
+
+## Returning a function: two separate moments
+
+To answer to any **method** name, `get` has to return a function. A method call like `catchAll.hello(42)` is really two steps:
+
+```ts
+const fn = catchAll.hello; // 1. lookup: get trap runs, with name = "hello"
+fn(42); // 2. call: the function get returned runs, with 42
+```
+
+So there are two functions involved, and they get different information:
+
+```ts
+get: (_target, name) => {
+  // moment 1: I know the NAME, but not the data
+  return (...args: unknown[]) => {
+    // moment 2: I know the DATA (and still the name, from the outer scope)
+  };
+};
+```
+
+The inner function can still use `name` because it's a closure: it remembers variables from where it was written.
+
+#### The mistake I made
+
+My first version put the data parameter on the wrong function:
+
+```ts
+get: (_target, name, ...args: unknown[]) => {
+  return () => {
+    subscribers.forEach((fn) => fn(...args));
+  };
+};
+```
+
+It compiled, but `args` caught `get`'s third argument (the `receiver`, i.e. the proxy itself), and the inner function took no parameters, so the real message data was thrown away. Every subscriber would have received the proxy instead of the telemetry. **The data only exists at moment 2, so the parameter belongs on the inner function.**
+
+## Why not just loop over the interface?
+
+My first idea was: loop over the names in `keyof ILiftHubReceiver` and build one method per name. That can't work, because **types are erased at runtime**. TypeScript checks the code and then removes every type. `ILiftHubReceiver` doesn't exist in the JavaScript that actually runs, so there is nothing to loop over.
+
+A Proxy sidesteps this. It doesn't need to know the names in advance, because it answers whatever name is asked for, at the moment it's asked.
+
+## The real thing: my receiver
+
+```ts
+private receiverProxy = new Proxy(
+  {},
+  {
+    get: (_target, name) => {
+      return async (...args: unknown[]) => {
+        this.subs
+          .get(name as keyof ILiftHubReceiver)
+          ?.forEach((fn) => fn(...args));
+      };
+    },
+  },
+) as ILiftHubReceiver;
+```
+
+And in the constructor, SignalR gets the proxy instead of `this`:
+
+```ts
+getReceiverRegister("ILiftHubReceiver").register(this.connection, this.receiverProxy);
+```
+
+The generated binder calls my receiver like this, when a message arrives:
+
+```ts
+(...args) => receiver.calibrationStateUpdated(...args);
+```
+
+That's a lookup (`get` runs with `"calibrationStateUpdated"`) followed by a call with the data. Exactly the two moments from above. A new message in the contracts now needs **no** change in `HubService`.
+
+Three details:
+
+- **`get: (...) =>` is an arrow function** on purpose. A regular function written as `get(_target, name) { ... }` gets its own `this`, which would be the handler object. Arrow functions don't have their own `this`, so `this.subs` still means the `HubService` (see the Passing vs Calling page).
+- **`name as keyof ILiftHubReceiver`**: `name` is `string | symbol`, but `subs` is keyed by message names. The cast tells TS "trust me, this will be a message name."
+- **`async`**: the interface methods return `Promise<void>`, so the inner function does too. It would work without it, but this matches the contract.
+
+## What the `as ILiftHubReceiver` cast gives up
+
+TypeScript can't analyse what a `get` trap will return, so `new Proxy({}, ...)` is typed as `{}`. The cast at the end is me promising "this has every `ILiftHubReceiver` method." TS believes me and **stops checking**.
+
+Here that's a good trade. The old version's type checking caught nothing useful: an unhandled message just has no subscribers, which is harmless. The checking I care about lives in `subscribe()`, which reads the generated types directly, so subscribers are still fully typed.
+
+## Gotchas
+
+**It answers to everything, including things I didn't intend.** `receiverProxy.typoMessage()` silently does nothing instead of throwing. For a pub/sub forwarder that's fine, but it's worth knowing.
+
+**`then` is also "a method".** If anything ever did `await receiverProxy`, JS would ask for `.then`, get a function back, treat the proxy as a Promise and wait forever. Same for code that checks `typeof x.toJSON === "function"` and similar. I never await the receiver, so it's not a problem here, but a catch-all proxy shouldn't be passed around as a general object.
+
+**Debugging looks odd.** `console.log(proxy)` shows a `Proxy` wrapper, and the methods don't appear as real properties because they don't exist until someone asks for them.
+
+**Slower than a plain object.** Every property access runs my trap. Irrelevant for a few messages per second, but not something to put in a hot loop.
+
+## Other traps
+
+`get` is the one I needed, but there's one trap per object operation:
+
+- `get`: reading, `proxy.x`
+- `set`: writing, `proxy.x = 1`
+- `has`: checking, `"x" in proxy`
+- `deleteProperty`: `delete proxy.x`
+- `apply`: calling, `proxy()` (when the target is a function)
+- `construct`: `new proxy()`
+
+`set` is the interesting one: it's how **Vue's reactivity** and libraries like **Immer** and **MobX** know when I change something. Writing `state.count = 1` on a proxy runs a trap that can re-render the UI. Test mocking tools use the same idea to fake objects that answer to any method.
+
+## When to reach for a Proxy
+
+- When the **names aren't known in advance**, or there are many names that all behave the same way (forwarders, mocks, API clients built from a URL path).
+- When I need to **react to reads or writes** on an object (reactivity, logging, validation).
+
+When there are a few fixed names with different behaviour, plain methods are clearer and keep full type checking.
+
+## Takeaway
+
+A `Proxy` is a stand-in object whose traps decide what happens on each operation. A `get` trap that returns a function turns it into an object that answers to **any** method name. The name arrives at lookup and the data arrives at the call, so they belong to two different functions.
+
+## Open threads for next time
+
+- `Reflect`: the usual partner of `Proxy`, used inside traps to fall back to the normal behaviour.
+- Mapped types: could `ILiftHubReceiver` be built from a list of names so the cast isn't needed?

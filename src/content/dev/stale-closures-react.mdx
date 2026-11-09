@@ -1,0 +1,90 @@
+# Stale Closures in React
+
+## Where I started
+
+A form let the user verify two crane IDs, each with its own button. Verifying took a moment, so you could start both. Sometimes, one crane's result simply vanished. The code looked correct:
+
+```ts
+const setCraneId = async (crane: CraneId, id: string) => {
+  setCranes({ ...cranes, [crane]: { id, status: "verifying" } });
+  await verify(id);
+  setCranes({ ...cranes, [crane]: { id, status: "valid" } });
+};
+```
+
+## Each render has its own values
+
+When a component renders, its state variables are **constants for that render**. A function created during that render closes over those exact values (see Closures).
+
+```tsx
+function Counter() {
+  const [count, setCount] = useState(0);
+  // during the first render, count is 0
+  // every function created now sees count = 0, forever
+}
+```
+
+The next render creates new functions that see the new `count`. But any function from the old render, still running somewhere, keeps the old value. That function is **stale**.
+
+## What went wrong
+
+Following the two verifications:
+
+1. Click "verify Crane 1". `setCraneId` starts with `cranes` = both idle. It sets Crane 1 to verifying.
+2. Click "verify Crane 2" before Crane 1 finishes. A new render has happened, so this call sees Crane 1 verifying. It sets Crane 2 to verifying.
+3. Crane 1's `await` finishes. That call still holds its **original** `cranes`, from before step 2, where Crane 2 was idle. It writes `{ ...cranes, Crane1: valid }`, so Crane 2 is overwritten back to idle.
+
+The bug needs an `await` (or a timer, or an event) between reading the state and using it. Synchronous code finishes before any re-render, so it can't see stale values.
+
+## The fix: updater functions
+
+Instead of a new value, pass the setter a **function** that receives the latest state:
+
+```ts
+setCranes((prev) => ({ ...prev, [crane]: { id, status: "valid" } }));
+```
+
+React calls that function with the current state at the moment the update is applied, not the state from when your function was created. Each update builds on the one before, so nothing is overwritten.
+
+**Rule:** when the new state is calculated from the old state, use the updater form.
+
+```ts
+setCount((c) => c + 1);
+setItems((items) => [...items, newItem]);
+setFlags((f) => ({ ...f, [key]: true }));
+```
+
+`[key]: true` is a **computed property name**: the value of `key` becomes the property name.
+
+## Same update twice in one handler
+
+The updater form also matters without any async gap:
+
+```ts
+setCount(count + 1);
+setCount(count + 1); // count is still the same old value: +1 total
+
+setCount((c) => c + 1);
+setCount((c) => c + 1); // each builds on the last: +2 total
+```
+
+## The interval classic
+
+```tsx
+useEffect(() => {
+  const id = setInterval(() => {
+    setCount(count + 1); // count is 0 forever, so this keeps setting 1
+  }, 1000);
+  return () => clearInterval(id);
+}, []);
+```
+
+The effect ran once, so its callback closed over the first render's `count`. Either use `setCount((c) => c + 1)`, or list `count` as a dependency so the effect restarts with fresh values (see useEffect: Dependencies and Cleanup).
+
+## When you need the latest value but aren't setting state
+
+The updater form only helps for setting state. If an async callback needs to **read** the latest value (for example, "has the user entered yet?"), keep it in a ref that's updated after each render, and read `ref.current` in the callback (see State, Refs and Derived Values).
+
+## Takeaway
+
+A function from an old render keeps that render's values. After an `await`, a timer or an event, they may be out of date. When new state depends on old state, pass a function to the setter, and React gives it the latest value.

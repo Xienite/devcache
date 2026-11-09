@@ -1,0 +1,104 @@
+# Typed Arrays
+
+## Where I started
+
+To generate a random ID, I filled a `Uint8Array` with random bytes and wanted to turn each byte into hex text. The obvious `.map` gave me zeros instead of text. That's when I found out typed arrays are not just arrays with a type.
+
+## What they are
+
+A **typed array** is a fixed-length array where every item is a number of one specific kind, stored as raw bytes in memory. `Uint8Array` is the most common one:
+
+- **U**: unsigned, so no negative numbers
+- **int8**: whole numbers stored in 8 bits, one byte
+- So every item is a whole number from **0 to 255**
+
+```js
+const bytes = new Uint8Array(4);   // [0, 0, 0, 0]
+bytes[0] = 200;
+bytes;                              // Uint8Array [200, 0, 0, 0]
+```
+
+## The family
+
+- **`Uint8Array`**: 1 byte per item, 0 to 255
+- **`Int8Array`**: 1 byte, signed, -128 to 127
+- **`Uint8ClampedArray`**: 1 byte, 0 to 255, but clamps instead of wrapping (see below)
+- **`Uint16Array` / `Int16Array`**: 2 bytes per item
+- **`Uint32Array` / `Int32Array`**: 4 bytes per item
+- **`Float32Array` / `Float64Array`**: decimal numbers
+- **`BigInt64Array` / `BigUint64Array`**: 8 bytes, read and written as `BigInt`
+
+## How they differ from normal arrays
+
+**Fixed length.** There's no `push` or `pop`. The size is set when you create it.
+
+**Values are forced into range.** A `Uint8Array` can't hold 256, so it wraps around:
+
+```js
+new Uint8Array([256, 257, -1]); // Uint8Array [0, 1, 255]
+new Uint8ClampedArray([300, -5]); // Uint8ClampedArray [255, 0]
+```
+
+Clamped arrays cap at the edges instead, which is what canvas pixel data uses so colours don't wrap from bright to dark.
+
+**Everything stored must be a number.** Anything else is converted to a number first, and whatever can't be converted becomes `0`.
+
+## The `.map` trap
+
+This is the one that got me:
+
+```js
+const bytes = new Uint8Array([10, 255]);
+bytes.map((b) => b.toString(16)); // Uint8Array [0, 0]
+```
+
+`.map` on a typed array returns **another typed array of the same kind**. The callback returns `"a"` and `"ff"`, which are strings, so they're converted to numbers. `"a"` and `"ff"` aren't valid numbers, so both become `0`. No error, just wrong data.
+
+To get strings out, make a **normal** array first:
+
+```js
+Array.from(bytes, (b) => b.toString(16)); // ["a", "ff"]
+[...bytes].map((b) => b.toString(16));    // ["a", "ff"]
+```
+
+`Array.from(source, mapFn)` creates a normal array and runs `mapFn` on each item along the way.
+
+## Bytes to hex
+
+Hex is a common way to write bytes as text, because each byte is exactly two hex characters (`00` to `ff`):
+
+```js
+Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+```
+
+- `toString(16)` writes the number in base 16: `255` becomes `"ff"`, `10` becomes `"a"`.
+- `padStart(2, "0")` makes sure single digits get a leading zero, so `"a"` becomes `"0a"`. Without it, the output length would vary.
+- `join("")` glues all the pieces into one string.
+
+## Where you meet them
+
+- **Randomness**: `crypto.getRandomValues(new Uint8Array(16))` fills the array with secure random bytes.
+- **Binary data**: file contents, images and network data often arrive as an `ArrayBuffer`, and a typed array is how you read and write the bytes in it.
+- **Canvas pixels**: `getImageData` gives a `Uint8ClampedArray` of red, green, blue and alpha values.
+- **WebGL and audio**: vertex data and sound samples are `Float32Array`s.
+- **Text encoding**: `new TextEncoder().encode("hi")` returns a `Uint8Array` of UTF-8 bytes.
+
+## `ArrayBuffer`: the memory underneath
+
+A typed array is a **view** onto an `ArrayBuffer`, which is the raw block of bytes. Several views can share one buffer and read the same bytes in different ways:
+
+```js
+const buffer = new ArrayBuffer(4);
+const asBytes = new Uint8Array(buffer);
+const asOneNumber = new Uint32Array(buffer);
+asOneNumber[0] = 1;
+asBytes; // Uint8Array [1, 0, 0, 0] on most machines
+```
+
+## Takeaway
+
+Typed arrays are fixed-length, number-only views onto raw memory, and they quietly convert whatever you store. When you need anything other than numbers out of one, convert it to a normal array first with `Array.from`.
+
+## Open threads for next time
+
+- Why `[1, 0, 0, 0]` "on most machines": byte order (endianness), and `DataView` for reading binary formats that specify it.

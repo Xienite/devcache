@@ -1,0 +1,137 @@
+# Testing Asynchronous Code
+
+## Where I started
+
+My test made a request fail, then checked that the error was shown. It failed, even though the app worked in the browser. The check simply ran too early: the code handling the failure hadn't run yet. Testing async code is mostly about controlling **when** things happen.
+
+## Why the check ran too early
+
+A promise's `.then` and `.catch` callbacks never run immediately. They're queued as **microtasks**, which run once the current code has finished (see the Event Loop page).
+
+```ts
+it("shows an error", () => {
+  register.mockRejectedValueOnce(new Error("taken"));
+  renderTheHook(); // the effect calls register; the .catch is queued
+
+  expect(setError).toHaveBeenCalled(); // runs NOW, before the .catch
+});
+```
+
+The test is synchronous, so it reaches the `expect` before the queued `.catch` gets its turn.
+
+## Fix: let pending work run, with `await`
+
+```ts
+it("shows an error", async () => {
+  register.mockRejectedValueOnce(new Error("taken"));
+  renderTheHook();
+
+  await act(async () => {});
+
+  expect(setError).toHaveBeenCalled();
+});
+```
+
+Two things happen in that strange-looking line:
+
+- **The `await`** pauses the test and lets everything already queued run, including the `.catch`. The empty async function has nothing to do itself, but awaiting it hands control back to the queue. The test must be `async` to use `await`.
+- **The `act`** tells React to finish applying any state updates those callbacks made, and re-render, before the test continues. Without it, `result.current` could still show the old state, and React warns that an update "was not wrapped in act(...)".
+
+## What `act` is
+
+React batches updates and applies them later. In tests, `act(() => { ... })` means "run this, then finish all resulting updates and renders". Testing Library already wraps `render`, `fireEvent` and `rerender` in `act` for you. You only call it yourself when something **outside** those triggers an update, such as a callback you invoke on a fake, or a promise settling.
+
+- **Synchronous `act(() => ...)`** for updates triggered directly.
+- **`await act(async () => ...)`** when promises need to settle too.
+
+## Waiting for something to appear
+
+When you don't know exactly when it will happen, wait for the result instead:
+
+```ts
+expect(await screen.findByRole("alert")).toBeTruthy();
+
+await waitFor(() => {
+  expect(onSave).toHaveBeenCalled();
+});
+```
+
+`findBy...` and `waitFor` retry until the check passes or a timeout runs out (1 second by default). Convenient, but slower and less precise than controlling the timing yourself.
+
+## Controlling time: fake timers
+
+Code that waits with `setTimeout` would make tests slow. Fake timers replace the clock:
+
+```ts
+beforeEach(() => vi.useFakeTimers());
+afterEach(() => vi.useRealTimers());
+
+it("verifies after a delay", async () => {
+  act(() => {
+    void result.current.verify("12-1300-045678");
+  });
+  expect(result.current.status).toBe("verifying");
+
+  await act(() => vi.runAllTimersAsync());
+  expect(result.current.status).toBe("valid");
+});
+```
+
+- **`vi.advanceTimersByTime(800)`**: move the clock forward 800 ms, running any timers due.
+- **`vi.runAllTimers()`**: run every pending timer.
+- **`vi.runAllTimersAsync()`**: the same, but also lets promises settle in between. Use this when timers and `await` are mixed, as in "wait 800 ms, then set state".
+
+`void` in front of a call marks a promise you deliberately don't await, which keeps linters happy.
+
+## Controlling exactly when a promise settles
+
+For race conditions, "it fails" isn't enough. It has to fail **at a specific moment**, for example after the user has changed their mind. A mock returning a pending promise you settle yourself does that (see Deferred Promises):
+
+```ts
+let rejectRegistration!: (error: Error) => void;
+vi.mocked(connection.registerDevice).mockImplementationOnce(
+  () => new Promise<void>((_resolve, reject) => {
+    rejectRegistration = reject;
+  }),
+);
+
+const { result, setRoleSelection, changeRole } = render(connection, {
+  role: "Operator",
+  crane: "Crane1",
+});
+
+changeRole({ role: "Operator", crane: "Crane2" });
+expect(connection.registerDevice).toHaveBeenLastCalledWith("Crane2");
+
+await act(async () => rejectRegistration(new Error("taken")));
+
+expect(setRoleSelection).not.toHaveBeenCalled();
+expect(result.current.error).toBeUndefined();
+```
+
+The middle `expect` matters: it proves the change really happened before the old request failed. Without it, a broken `changeRole` could make the test pass for the wrong reason.
+
+## Changing inputs mid-test
+
+`renderHook` gives you `rerender`, but a context value set up in a `wrapper` is fixed unless the wrapper reads a variable. Keep the value in a `let` that the wrapper closes over, change it, then `rerender` (see Closures):
+
+```ts
+let roleSelection = initialRole;
+
+const hook = renderHook(() => useDeviceRegistration(), {
+  wrapper: ({ children }) => (
+    <RoleContext.Provider value={{ roleSelection, setRoleSelection }}>
+      {children}
+    </RoleContext.Provider>
+  ),
+});
+
+const changeRole = (next: RoleSelection) => {
+  roleSelection = next;
+  hook.rerender();
+};
+```
+
+## Takeaway
+
+Async callbacks run after the current code, so a test has to give them a turn: `await act(async () => {})` for promises, fake timers for `setTimeout`, `findBy` and `waitFor` when the timing isn't known. For races, settle promises yourself at the exact moment that matters, and check the steps in between really happened.

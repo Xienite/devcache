@@ -1,0 +1,104 @@
+# CORS (Cross-Origin Resource Sharing)
+
+## Where I started
+
+Wiring the tandem-lift frontend to its backend: why can't `npm run dev` on `localhost:5173` just call the backend on `localhost:5062`, and why does a proxy (Nginx in Docker, Vite's `server.proxy` in dev) make the problem disappear?
+
+## What an "origin" is
+
+An origin is **scheme + host + port**. All three must match for two URLs to be "same-origin".
+
+| URL A | URL B | Same origin? | Why |
+|---|---|---|---|
+| `http://localhost:5173` | `http://localhost:5173/api/x` | yes | path doesn't count |
+| `http://localhost:5173` | `http://localhost:5062` | **no** | different port |
+| `http://localhost:5173` | `https://localhost:5173` | **no** | different scheme |
+| `http://localhost:5173` | `http://127.0.0.1:5173` | **no** | different host string, even though it's the same machine |
+
+The last one surprises people: the browser compares the strings, it doesn't resolve them.
+
+## The rule CORS relaxes: the same-origin policy
+
+By default, JS running on a page may **send** requests anywhere, but may only **read the response** if it came from the page's own origin. This is the *same-origin policy*, and it's enforced by the browser.
+
+Why it exists: you're logged into your bank in one tab (cookies set). You open `evil.example` in another. Without this policy, `evil.example`'s JS could `fetch("https://bank.example/account")`, the browser would attach your bank cookies automatically, and the script could read your balance. The policy stops the script from reading that response.
+
+## CORS = the server opting in
+
+CORS is the mechanism for a server to say "it's fine, let these other origins read my responses." It's done entirely with HTTP headers:
+
+1. Browser sends the request with an `Origin: http://localhost:5173` header (added automatically, you can't fake it from JS).
+2. Server replies with `Access-Control-Allow-Origin: http://localhost:5173` (or `*`).
+3. Browser checks: does the allowed origin match the page's origin? If yes, JS gets the response. If no, JS gets a `TypeError: Failed to fetch` and the console shows a CORS error.
+
+**Key insight:** the server doesn't block anything. The response often arrives at the browser just fine (you can even see it in the Network tab). The *browser* refuses to hand it to your JS.
+
+## Preflight requests
+
+For "non-simple" requests (e.g. `Content-Type: application/json`, methods like `PUT`/`DELETE`, custom headers like `Authorization`), the browser first sends an automatic `OPTIONS` request, the **preflight**, asking "would you accept this?":
+
+```
+OPTIONS /api/lift
+Origin: http://localhost:5173
+Access-Control-Request-Method: POST
+Access-Control-Request-Headers: content-type
+```
+
+Only if the server answers with matching `Access-Control-Allow-*` headers does the browser send the real request. So in DevTools you'll sometimes see two requests for one `fetch()` call. That's normal, not a bug.
+
+## Credentials (cookies, auth)
+
+By default, cross-origin `fetch` doesn't send cookies. If it should (`credentials: "include"`), the server must also send `Access-Control-Allow-Credentials: true`, **and** `Access-Control-Allow-Origin` must then name a specific origin. `*` is not allowed together with credentials.
+
+SignalR's JS client uses credentials by default, which is why a SignalR backend needs an explicit origin list, not a wildcard.
+
+## What CORS is *not*
+
+- **Not server security.** It only constrains browsers. `curl`, Postman, or another backend calling your API ignore CORS completely. If an endpoint needs protecting, that's authentication/authorization, not CORS.
+- **Not something the frontend can fix.** The fix for a CORS error is always either on the server (send the right headers) or architectural (make it same-origin). `mode: "no-cors"` in `fetch` does *not* fix it; it just gives you an empty, unreadable response.
+- **Not applied to every resource type.** `<img>`, `<script>`, `<link>` and plain form submissions can load cross-origin (that's how CDNs work). CORS kicks in for `fetch`/`XMLHttpRequest`. WebSocket connections aren't CORS-checked by the browser either, though the browser still sends `Origin` so the server can check it itself. SignalR's first step (`/negotiate`) is a normal `fetch`, though, so CORS still applies there.
+
+## The two ways to deal with it
+
+### A. Make it same-origin with a proxy (what tandem-lift does)
+
+The browser only ever talks to one origin. That server forwards `/api` and `/hubs` to the backend behind the scenes. Server-to-server forwarding isn't a browser request, so CORS never comes up.
+
+- Docker/staging: Nginx serves the built frontend *and* proxies `/api`, `/hubs` → backend container.
+- Dev: Vite's dev server does the same via `server.proxy`.
+
+```ts
+// vite.config.ts
+server: {
+  proxy: {
+    "/api": "http://localhost:5062",
+    "/hubs": { target: "http://localhost:5062", ws: true },
+  },
+},
+```
+
+Bonus: the app code just uses relative paths (`/api/...`), identical in every environment. No URL flags needed.
+
+### B. Configure CORS on the backend
+
+Needed when the frontend and API genuinely live on different origins (e.g. `app.example.com` and `api.example.com`, or a public API). In ASP.NET Core:
+
+```csharp
+builder.Services.AddCors(o => o.AddPolicy("frontend", p => p
+    .WithOrigins("http://localhost:5173")   // explicit list, no "*" with credentials
+    .AllowAnyHeader()
+    .AllowAnyMethod()
+    .AllowCredentials()));
+
+app.UseCors("frontend");
+```
+
+Downsides compared to A: one more environment-specific config to maintain, preflights add latency, and the frontend needs to know the absolute backend URL (usually via a build-time env var).
+
+## Debugging checklist
+
+1. Console says "blocked by CORS policy"? Open the Network tab and look at the failed request's **response headers**. Is `Access-Control-Allow-Origin` missing or wrong?
+2. Is there an `OPTIONS` request that failed? Then it's the preflight, check what the server returns for `OPTIONS`.
+3. Compare origins character by character: `localhost` vs `127.0.0.1`, `http` vs `https`, the port.
+4. Using credentials? Make sure it's not `*`.
+5. Ask whether you need cross-origin at all. Often a proxy is the simpler fix.

@@ -1,0 +1,105 @@
+# Async Race Conditions
+
+## Where I started
+
+An operator confirmed Crane 2, the request was slow, so they cancelled and confirmed Crane 1 instead. Then the server's rejection for Crane 2 finally arrived. My error handler did what it was written to do: reset the selection and show "couldn't claim the crane". The operator, now on Crane 1, was thrown back to the crane picker because of a request they had already abandoned.
+
+## The problem
+
+When you start async work, you don't control when it finishes. By then, the reason you started it may no longer be true. Results can also arrive **out of order**: the first request can finish after the second.
+
+Classic examples:
+
+- A search box: typing `re` then `react` fires two requests. If the `re` results arrive last, they overwrite the `react` results.
+- A detail page: switching from item 1 to item 2 quickly, and item 1's data arriving last.
+- Any form that submits, then lets the user change their mind before the answer arrives.
+
+The bug isn't in the request. It's that **old answers are applied to new state**.
+
+## Fix 1: ignore stale results
+
+Mark each piece of work so it knows when it has been superseded. In React, an effect's cleanup is the natural place:
+
+```tsx
+useEffect(() => {
+  let stale = false;
+
+  fetchResults(query).then((results) => {
+    if (stale) return;
+    setResults(results);
+  });
+
+  return () => {
+    stale = true;
+  };
+}, [query]);
+```
+
+How it works:
+
+1. Each run of the effect creates its **own** `stale` variable.
+2. The `.then` callback from that run closes over that same variable (see Closures).
+3. When `query` changes, React runs the cleanup of the old run first, which sets **its** `stale` to `true`.
+4. If the old request finishes later, its callback sees `stale` and returns early. The new run has its own `stale`, still `false`.
+
+The same applies to the error path:
+
+```tsx
+registerDevice(role).catch((e) => {
+  if (stale) return;
+  showError(e);
+});
+```
+
+A nice side effect: if the connection drops mid-request, a dependency like the connection status changes, so the cleanup marks the old request stale. Its failure (caused by the drop, not by a real rejection) is ignored, and a fresh attempt starts.
+
+## Fix 2: cancel the work
+
+Ignoring the result still lets the request run to the end. With `fetch`, you can cancel it with an `AbortController`:
+
+```tsx
+useEffect(() => {
+  const controller = new AbortController();
+
+  fetch(`/api/search?q=${query}`, { signal: controller.signal })
+    .then((res) => res.json())
+    .then(setResults)
+    .catch((e) => {
+      if (e.name === "AbortError") return; // we cancelled it, not a real error
+      setError(e);
+    });
+
+  return () => controller.abort();
+}, [query]);
+```
+
+Aborting makes the `fetch` reject with an `AbortError`, so remember to ignore that one. Cancelling saves bandwidth and server work, but not every API supports it. The stale flag works with any promise.
+
+## Fix 3: keep only the latest
+
+Outside React, or when there's no effect to hang cleanup on, count requests:
+
+```ts
+let latest = 0;
+
+async function search(query: string) {
+  const id = ++latest;
+  const results = await fetchResults(query);
+  if (id !== latest) return; // a newer search has started
+  render(results);
+}
+```
+
+## Fix 4: don't allow overlap
+
+Sometimes the simplest fix is in the UI: disable the button while a request runs, or let a library handle it. Data-fetching libraries such as TanStack Query handle stale responses for you.
+
+But be careful: disabling a button doesn't stop every overlap. A cancel button, navigation, or a reconnect can still change what the result should apply to.
+
+## Testing it
+
+A race is almost impossible to reproduce by clicking. In tests, control exactly when each promise settles with a deferred promise: start the request, change the input, then settle the old one (see Deferred Promises and Testing Asynchronous Code). Then check the test fails without the `if (stale) return` line, to prove it really tests the race.
+
+## Takeaway
+
+Async results can arrive late or out of order. Before applying one, check it's still wanted: an effect's cleanup can mark the old run stale, `AbortController` can cancel a `fetch`, and a counter can keep only the latest. Ignore the "late" failures too, not just the late successes.

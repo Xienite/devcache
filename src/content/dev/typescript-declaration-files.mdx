@@ -1,0 +1,213 @@
+# Declaration Files and Module Augmentation
+
+## Where I started
+
+Setting up typed translation keys for `react-i18next` in the tandem-lift frontend. The file that started it all, `src/@types/i18next.d.ts`:
+
+```ts
+import "i18next";
+import type { resources } from "../i18n";
+
+declare module "i18next" {
+  interface CustomTypeOptions {
+    resources: typeof resources["en"];
+  }
+}
+```
+
+Six lines, but almost every line uses a different TS concept. The sections below go through them one at a time.
+
+## What a `.d.ts` file is
+
+A `.d.ts` file contains **types only, no runtime code**. The compiler reads it to learn the shape of things. It is never turned into JavaScript and never ends up in the bundle.
+
+| Allowed | Not allowed |
+|---|---|
+| `type`, `interface` | `const x = 5` (an implementation) |
+| `declare const x: number` | function bodies `{ ... }` |
+| `declare function f(a: string): void` | classes with method bodies |
+| `declare module "foo" { ... }` | anything that would actually run |
+| `import` / `export` of types | |
+
+You use hundreds of these without noticing. Cmd+click `document` or `Array` in VS Code and you land in `lib.dom.d.ts` / `lib.es5.d.ts` inside `node_modules/typescript`. Those files describe every browser API as types, with no implementation, because the browser provides the real thing. Same for React: `react` ships JS, and `@types/react` ships the `.d.ts` that describes it.
+
+What a `.d.ts` is used for:
+
+1. **Describe untyped JS** (`declare module "some-old-lib" { export function x(): void }`)
+2. **Declare globals** (for example something a script tag puts on `window`)
+3. **Augment someone else's types**: reopen a library's module and add to it. This is the i18next case.
+
+## The `declare` keyword
+
+`declare` means: "this exists at runtime, but it's defined somewhere else. Trust me about its type."
+
+```ts
+declare const API_URL: string; // "some build step / script tag provides this"
+```
+
+No value, just a promise to the compiler. If the promise is wrong, you get a runtime crash that TS can't catch. Declaration files are one of the few places where you can lie to the compiler without it noticing.
+
+## Script vs module: why the bare `import "i18next"`
+
+TS treats every file as one of two things:
+
+- **Module**: the file has at least one top-level `import` or `export`. Its declarations are private unless exported.
+- **Script**: no `import`/`export` at all. Its declarations are **global**.
+
+This changes what `declare module "i18next" { ... }` means:
+
+| File kind | `declare module "i18next"` means |
+|---|---|
+| Script | "Here is *the* definition of the module `i18next`." This **replaces** the library's real types. |
+| Module | "Add to the existing module `i18next`." This **augments** them. |
+
+So `import "i18next"` at the top isn't there to import anything useful. Its job is to make the file a module, so the block underneath extends the library's types instead of overwriting them. (The `import type { resources }` line would already be enough to make it a module, but the bare import makes the intent explicit and keeps working if the other import ever moves.)
+
+## Interface merging + module augmentation
+
+Declaring an interface with the same name twice in the same scope doesn't cause a "duplicate" error. TS **merges** the two declarations:
+
+```ts
+interface Foo { a: string }
+interface Foo { b: number }
+// Foo is now { a: string; b: number }
+```
+
+(Try it in a scratch file and hover `Foo`.) This only works for `interface`. `type Foo = ...` twice is an error. That difference is one of the real reasons to choose `interface` over `type`.
+
+**Module augmentation** combines this with `declare module`. Inside its own types, i18next ships an (almost) empty interface on purpose:
+
+```ts
+// node_modules/i18next/typescript/options.d.ts (simplified)
+export interface CustomTypeOptions {}
+```
+
+`declare module "i18next" { interface CustomTypeOptions { ... } }` reopens i18next's module scope from our file, and the two `CustomTypeOptions` declarations merge. i18next's own types for `t()` read from `CustomTypeOptions["resources"]`. If that's empty, `t` accepts any string. If it holds our translation object, `t` computes every valid key path from it:
+
+```ts
+// en = { common: { appName: "...", radius: "..." } }
+// → t's key parameter becomes "common.appName" | "common.radius"
+t("common.appNam"); // error: not assignable to "common.appName" | "common.radius"
+```
+
+So the library deliberately leaves a "socket" for us to plug our app-specific types into. Many libraries use this pattern (react-router, styled-components, Vue, Express's `Request`).
+
+## `typeof` in type position, and `["en"]`
+
+```ts
+resources: typeof resources["en"];
+```
+
+Two operators here:
+
+- **`typeof resources`**: in a *type* position, `typeof` turns a **value** into its **type**. (Not the same as JS's runtime `typeof x === "string"`, which returns a string at runtime.) `resources` is a JS object; `typeof resources` is "the type TS inferred for that object".
+- **`["en"]`**: an **indexed access type**. Same idea as `obj["en"]` for values, but on types: "the type of the `en` property".
+
+`resources` looks like `{ en: { translation: {...} } }`. i18next wants the inner part, `{ translation: {...} }` (namespace name → keys), not the language level. Hence `["en"]`: the English file is the reference shape for the keys.
+
+The big win: **one source of truth.** Add a key to `en.ts`, and the types follow automatically. No hand-written key list to keep in sync.
+
+## `import type` and `verbatimModuleSyntax`
+
+```ts
+import type { resources } from "../i18n";
+```
+
+`import type` says "I only need this for types; erase this import completely when compiling to JS." With `verbatimModuleSyntax: true` (on in the tandem-lift tsconfig), TS keeps every plain `import` as-is in the output and removes only `import type`. So the keyword makes the intent explicit, and a type-only file can never accidentally pull in runtime code (here, it would otherwise import the module that calls `i18n.init()`).
+
+You can still use `typeof` on a type-only import. `typeof` in a type position is itself type-level, so it never needs the real value.
+
+## `as const`: what it actually buys here
+
+```ts
+export const en = {
+  common: {
+    appName: "Tandem Lift Assist",
+    radius: "Radius: {{radius}} m",
+  },
+} as const;
+```
+
+What `as const` does in general: TS infers the **narrowest** possible type, deeply, and makes everything `readonly`.
+
+```ts
+const a = { name: "x" };          // { name: string }
+const b = { name: "x" } as const; // { readonly name: "x" }
+```
+
+I assumed `as const` was needed for key checking. **It isn't.** I tested both versions. Property *names* are always kept in the inferred type, so `"common.appNam"` is rejected either way. What changes is the *values*:
+
+| Check | With `as const` | Without |
+|---|---|---|
+| Typo in key (`"common.appNam"`) | error | error |
+| Wrong interpolation variable (`t("common.radius", { radiu: 3 })`) | **error** | silently accepted |
+| Return type of `t("common.radius", ...)` | the literal string `"Radius: {{radius}} m"` | `string` |
+| Missing interpolation object (`t("common.radius")`) | not caught | not caught |
+
+So `as const` lets i18next read the `{{radius}}` placeholder *out of the string's type* and require that exact variable name. That only works if the type is the literal string, not plain `string`. That's also why the docs prefer `.ts` resource files over `.json`: JSON imports can't be `as const`, so their values are always `string`.
+
+**Side effect to know about:** because `typeof en` now means "`appName` is exactly the string `"Tandem Lift Assist"`", you can't write `const de: typeof en = {...}` for the German file. Every German string would have to equal the English one. The fix is a type that keeps the *shape* of `en` but widens every leaf to `string` (open exercise: mapped type `{ [K in keyof T]: ... }` + conditional type `T[K] extends string ? ... : ...`, recursive).
+
+## The `skipLibCheck` trap
+
+Vite's tsconfig template sets `"skipLibCheck": true`. Despite the name, it skips type-checking **every `.d.ts` file, including your own**, not only `node_modules`. It's on because checking library types is slow and occasionally noisy.
+
+Consequence: a mistake inside a hand-written `.d.ts` can fail **silently**. My first version had `defaultNS: typeof defaultNS;` (copied from the docs) with no `defaultNS` in scope. `tsc -b` passed. Only `tsc --skipLibCheck false` reported it:
+
+```
+src/@types/i18next.d.ts(6,23): error TS2552: Cannot find name 'defaultNS'.
+```
+
+Lesson: for a hand-written `.d.ts`, prove it works by using it. Typo a key on purpose and check for the red squiggle. A clean compile proves nothing.
+
+## Why `src/@types/` and not `src/types/`?
+
+The `@` has **no special meaning** to TS. A local `src/@types` folder is only a naming convention, and it's included in the build only because it sits inside `"include": ["src"]`.
+
+Where the convention comes from: **DefinitelyTyped**, the community repo that publishes type packages for untyped JS libraries under the npm scope `@types` (`@types/node`, `@types/react`, ...). They install to `node_modules/@types/`, and TS automatically loads everything in there (the `typeRoots` default).
+
+So the folder name signals the same *kind* of file:
+
+| Folder | Contains | How it's used |
+|---|---|---|
+| `src/types/` (e.g. `telemetry.ts`) | **our own** app types, `export type Telemetry = ...` | imported explicitly where needed |
+| `src/@types/` (e.g. `i18next.d.ts`) | **ambient** declarations / augmentations of **third-party** modules | never imported; TS picks them up because they're in the project |
+
+Gotcha: tandem-lift also has the path alias `@/*` → `src/*`. Since `@types` files are never imported, that never collides in practice, but `@/@types/...` would look confusing anyway.
+
+## `enableSelector`: string keys vs selector functions
+
+i18next offers two ways to pass a key:
+
+```ts
+t("common.appName");          // string API (default)
+t($ => $.common.appName);     // selector API (enableSelector: true in CustomTypeOptions)
+```
+
+**String API under the hood:** to type-check `"common.appName"`, TS has to build a union of *every* possible dotted path in the resources, using recursive template literal types. Cheap with 10 keys; with thousands it slows the editor down and can hit "type instantiation is excessively deep" (TS2589). And the key is just a string, so editor tooling can't follow it back to `en.ts`.
+
+**Selector API:** `$` is typed as the resources object itself, so `$.common.appName` is ordinary property access, which TS checks the same way as any object. No giant union. Bonus: since it's a real property access, Cmd+click on `appName` should jump to its definition in `en.ts` (not tested yet), and autocomplete works one level at a time. At runtime, i18next turns the function back into the string `"common.appName"` (exported as `keyFromSelector`, handy for tests).
+
+**Status (i18next 26.x):** off by default. The docs say it's planned to become the default, and that type support for the string API **may be deprecated in v27**. Starting with zero keys, adopting it is nearly free; switching later means a codemod over every call. For tandem-lift we went with the selector API (recorded in ADR 0004).
+
+Tested in tandem-lift with `enableSelector: true`:
+
+- Once it's enabled, plain string keys (`t("common.appName")`) become a **compile error**, so the two styles can't be mixed by accident.
+- Plurals: define `cranes_one` / `cranes_other`, call `t($ => $.common.cranes, { count: 2 })`. The suffixes are folded into one key.
+- Dynamic keys stay typed: `t($ => $.common.status[state])` with `state: "ok" | "lost"`.
+- Interpolation variable checking (see `as const` above) still works.
+
+## Recap: the file, line by line
+
+```ts
+import "i18next";                       // make this file a MODULE → augment, don't replace (script vs module)
+import type { resources } from "../i18n"; // type-only import, erased from JS (import type)
+
+declare module "i18next" {              // reopen i18next's module scope (module augmentation)
+  interface CustomTypeOptions {         // merges with i18next's own empty interface (interface merging)
+    resources: typeof resources["en"];  // value → type, then pick the "en" part (typeof + indexed access)
+  }
+}
+```
+
+And in `en.ts`, `as const` keeps the string values as literal types, so interpolation variables get checked.

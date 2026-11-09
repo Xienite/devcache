@@ -1,0 +1,128 @@
+# Unit Testing Basics with Vitest
+
+## Where I started
+
+Writing tests felt like learning another programming language: `render`, `screen`, `getByRole`, `expect`, `toMatchObject`, `vi.fn`, environments... It turns out the vocabulary is small. Most of the difficulty comes from the code being tested (async, React rendering), not from testing itself.
+
+## The shape of every test
+
+```ts
+import { describe, expect, it } from "vitest";
+import { add } from "./add";
+
+describe("add", () => {
+  it("adds two numbers", () => {
+    // Arrange: set up what the test needs
+    const a = 2;
+    const b = 3;
+
+    // Act: do the one thing being tested
+    const result = add(a, b);
+
+    // Assert: check the outcome
+    expect(result).toBe(5);
+  });
+});
+```
+
+- **`describe`** groups related tests, usually one group per function or component.
+- **`it`** (or `test`) is one test. Its name should read as a sentence about behaviour: "it adds two numbers", "it keeps Next disabled until both IDs are valid". When it fails, the name tells you what broke.
+- **Arrange, act, assert** keeps each test readable. If a test does several "acts", it may be several tests.
+
+Run them with `npx vitest` (watches for changes) or `npx vitest run` (once, as in CI).
+
+## Matchers: how to compare
+
+`expect(actual)` is followed by a **matcher**:
+
+- **`toBe(x)`**: exactly the same, using `Object.is`. For strings, numbers, booleans, and "the very same object".
+- **`toEqual(x)`**: same contents, checked deeply. For objects and arrays. Properties that are `undefined` are ignored.
+- **`toStrictEqual(x)`**: like `toEqual`, but `undefined` properties and class types must match too.
+- **`toMatchObject(x)`**: the actual object contains **at least** these properties. Extra ones are fine.
+- **`toBeTruthy()`**, **`toBeNull()`**, **`toBeUndefined()`**, **`toBeInstanceOf(Error)`**
+- **`toContain(item)`**, **`toHaveLength(n)`**, **`toMatch(/regex/)`**
+- **`toThrow()`**, for a function that should throw.
+- **`.not`** flips any of them: `expect(x).not.toBeNull()`.
+
+Choosing between `toEqual` and `toMatchObject` matters more than it seems:
+
+```ts
+expect(result.current).toEqual({ registered: true, entered: true });
+```
+
+This broke the day the hook also returned an `error` field, even though nothing it tested had changed. `toMatchObject` only checks the listed keys, so adding a field doesn't break unrelated tests.
+
+## Before and after each test
+
+```ts
+beforeEach(() => {
+  localStorage.clear();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+```
+
+These run around **every** test in the file (or `describe` block). Use them so each test starts from a clean state. Tests that depend on each other's leftovers pass or fail depending on the order they run in.
+
+## Environments: Node or browser?
+
+Vitest runs tests in **Node** by default. Node has `crypto`, timers and `fetch`, but no `document`, `window` or `localStorage`. Code that touches browser APIs, and any React component test, needs a simulated browser:
+
+```ts
+// @vitest-environment jsdom
+```
+
+That comment at the very top of a test file makes that one file use **jsdom**, a JavaScript implementation of the DOM. You can also set it for the whole project in the Vitest config. Pure logic (maths, parsing) is faster in plain Node.
+
+## Testing React components
+
+Testing Library renders a component and lets you find things the way a user would:
+
+```tsx
+render(<LoginForm />);
+
+fireEvent.change(screen.getByLabelText("Email"), { target: { value: "a@b.c" } });
+fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+expect(screen.getByRole("alert").textContent).toBe("Wrong password");
+```
+
+### Finding elements
+
+Prefer queries that match how people (and screen readers) find things:
+
+1. **`getByRole("button", { name: "Save" })`**: the best default. It also checks your accessibility.
+2. **`getByLabelText("Email")`**: form fields.
+3. **`getByText("Welcome")`**: plain text.
+
+Every query comes in three forms:
+
+- **`getBy...`**: returns the element, **throws** if there are zero or several matches.
+- **`queryBy...`**: returns `null` if there's no match. Use it to assert something is **absent**: `expect(screen.queryByRole("alert")).toBeNull()`.
+- **`findBy...`**: returns a promise and **waits** for the element to appear. For things that show up after async work.
+
+A gotcha: `getByLabelText` also matches `aria-label` attributes. A field labelled "Crane 1 ID" and a button with `aria-label="Verify Crane 1 ID"` both match `/Crane 1 ID/`. Anchor the pattern, `/^Crane 1 ID/`, or use `getByRole` with a name.
+
+### Interacting
+
+`fireEvent.click(element)` and `fireEvent.change(input, { target: { value } })` fire single DOM events. The `@testing-library/user-event` package simulates a real user more faithfully (focus, each keystroke), and is preferred for complex interactions.
+
+### Testing a hook directly
+
+```ts
+const { result } = renderHook(() => useCounter());
+act(() => result.current.increment());
+expect(result.current.count).toBe(1);
+```
+
+`result.current` is always the hook's **latest** return value.
+
+## Make sure the test can fail
+
+A test that passes no matter what is worse than no test, because it gives false confidence. After writing one, **break the code it protects** for a moment (delete the line, flip a condition) and check the test fails. Then undo the change. It takes seconds and catches tests that never really ran their assertions.
+
+## Takeaway
+
+Each test sets something up, does one thing, and checks the result. Pick matchers deliberately: `toBe` for primitives, `toEqual` for exact objects, `toMatchObject` for "at least these". Use jsdom for anything that needs the browser, query elements by role and label like a user would, and prove each test can fail.

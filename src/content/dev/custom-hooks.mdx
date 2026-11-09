@@ -1,0 +1,149 @@
+# Custom Hooks
+
+## Where I started
+
+I was asked to write a mock hook for data the backend didn't provide yet, and realised I didn't know what a hook should return, how it holds state, or how to design one. I'd been using hooks without a model of what they are.
+
+## What a hook is
+
+A **custom hook** is a normal function whose name starts with `use`, and which calls other hooks. That's all. No special return format, no registration.
+
+```ts
+function useOnlineStatus() {
+  const [online, setOnline] = useState(navigator.onLine);
+
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => {
+      window.removeEventListener("online", update);
+      window.removeEventListener("offline", update);
+    };
+  }, []);
+
+  return online;
+}
+```
+
+Think of it as a component's logic without the JSX. It lets several components reuse the same logic, and keeps components focused on what they show.
+
+## Three facts that explain most hook behaviour
+
+**1. Each call gets its own state.** Two components calling `useOnlineStatus()` each have their own `online` state. Calling a hook doesn't share anything. To share state, you need context, a store, or a server.
+
+**2. State lives with the component that called it.** When that component unmounts, the hook's state is gone. Mount it again and it starts from scratch.
+
+**3. A setter re-renders the calling component.** The hook runs again as part of that render, and returns fresh values.
+
+## The rules of hooks
+
+- **Call hooks at the top level**, not inside `if`, loops or nested functions. React identifies each hook by the order it's called in, so the order must be the same on every render.
+- **Only call them from components or other hooks.**
+- **Start the name with `use`**, so tools and people know the rules apply.
+
+## Designing one: three questions
+
+1. **What does the component need to read?** That's the returned data.
+2. **What does it need to do?** Those are the returned functions.
+3. **Who owns each piece of state?** Not everything belongs in the hook.
+
+For a form that verifies IDs against a server:
+
+- The text the user is typing belongs to the **form** (it's only a draft).
+- The submitted ID and the server's verdict belong to the **hook**.
+- "Is this field verified right now?" belongs to **nobody**. It's derived by comparing the two (see State, Refs and Derived Values).
+
+## Returning an object or an array
+
+```ts
+// array: the caller names the items
+const [value, setValue] = useState(0);
+
+// object: named by the hook
+const { cranes, setCraneId } = useCranePairing();
+```
+
+Return an **array** when callers will want their own names, usually for exactly two items like `useState`. Otherwise return an **object**: names are clearer, order doesn't matter, and you can add fields later without breaking callers.
+
+## Mocking with the real shape
+
+When the backend isn't ready, write the hook with the shape the real one will have, and fake the inside:
+
+```ts
+// Stub until the server method exists
+export function useCranePairing() {
+  const [cranes, setCranes] = useState(INITIAL);
+
+  const setCraneId = async (crane: CraneId, id: string) => {
+    setCranes((prev) => ({ ...prev, [crane]: { id, status: "verifying" } }));
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    const status = KNOWN_IDS.includes(id) ? "valid" : "invalid";
+    setCranes((prev) => ({ ...prev, [crane]: { id, status } }));
+  };
+
+  return { cranes, setCraneId };
+}
+```
+
+Components use `cranes` and `setCraneId` today. When the backend lands, only the hook's insides change (subscribe to an event, call the server). The components don't change at all.
+
+One limit to watch for: a mock's state is local to one browser. If two devices are meant to see the same server state, a mock can't simulate that, so a "shared" mock may need to be two separate mocks until the server exists.
+
+## Subscribe inside, or take the source as a parameter?
+
+Some hooks subscribe to the server themselves:
+
+```ts
+function useDeviceRegistration() {
+  const connection = useConnection();
+  useEffect(() => connection.subscribe("deviceRegistered", handle), [connection]);
+}
+```
+
+Others take a **start function** and never know where the data comes from:
+
+```ts
+const guidance = useSmoothGuidance(startScriptedGuidance); // a mock today
+const guidance = useSmoothGuidance((onMessage) =>
+  connection.subscribe("guidanceUpdated", onMessage),     // the server later
+);
+```
+
+The start function has the shape `(onMessage) => stop`, which is exactly what `subscribe()` returns and what an effect's cleanup wants.
+
+Which to pick depends on whether there's ever **more than one source**:
+
+- **One source, protocol logic** ("register, then wait for the confirmation"): subscribe inside. A parameter would be flexibility nobody uses.
+- **Several sources, source-independent job** ("take messages and smooth them"): take the source as a parameter. Swapping the mock for the real feed is one argument at the call site, and the hook never changes.
+
+A bonus: a test can pass a fake start function that emits two messages, with no connection provider and no mocked context.
+
+If the caller passes an inline arrow, it's a new function every render. Keep it in a ref inside the hook so the subscription doesn't restart every render (see useEffect: A function from the caller).
+
+## Hook or plain function?
+
+If it doesn't call any hook, it shouldn't be a hook.
+
+```ts
+function getDeviceId(): string {
+  // reads and writes localStorage, no React involved
+}
+```
+
+A value that's created once and never re-renders anything doesn't need React at all. A plain function is simpler, can be called from anywhere (including non-React code), and is easier to test.
+
+## Testing a hook
+
+`renderHook` from Testing Library renders a tiny component that calls your hook, and gives you its latest return value:
+
+```ts
+const { result } = renderHook(() => useOnlineStatus());
+result.current; // true
+```
+
+See Unit Testing Basics with Vitest.
+
+## Takeaway
+
+A custom hook is a function that uses other hooks, letting components share logic, not state. Design it around what the component reads and does, keep drafts and derived values out of it, return an object, and give a mock the same shape as the real thing.

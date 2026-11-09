@@ -1,0 +1,138 @@
+# useEffect: Dependencies and Cleanup
+
+## Where I started
+
+An operator's tablet asked the server to claim a crane. When the claim was rejected and the operator picked the same crane again, nothing happened: no request at all. The effect that sends the request simply didn't run. To understand why, I had to understand when effects run.
+
+## What an effect is for
+
+`useEffect` runs code **after** React has updated the screen, to keep something outside React in sync with your component: a server connection, a subscription, a timer, the document title.
+
+```tsx
+useEffect(() => {
+  document.title = `${count} new messages`;
+}, [count]);
+```
+
+## When it runs
+
+The second argument, the **dependency array**, decides:
+
+- **No array**: after every render.
+- **`[]`**: after the first render only.
+- **`[a, b]`**: after the first render, and again whenever `a` or `b` changed since the last render.
+
+"Changed" is checked with `Object.is`, which is basically `===`. So:
+
+- Same string, number or boolean: **unchanged**, even if you set it again.
+- A new object or array: **changed**, even with identical contents.
+- A new function: **changed**. Functions defined in the component are new every render.
+
+## Back to the crane
+
+```tsx
+useEffect(() => {
+  if (deviceRole && status === "Connected") {
+    connection.registerDevice(deviceRole);
+  }
+}, [connection, status, deviceRole]);
+```
+
+After the rejection, `deviceRole` was still `"Crane2"`. Picking Crane 2 again set it to `"Crane2"`, the same string. No dependency changed, so the effect didn't run. The fix was to reset the selection to `null` when a claim fails. Picking the crane again is then a real change.
+
+## Cleanup
+
+An effect can return a function. React calls it **before running the effect again**, and **when the component unmounts**:
+
+```tsx
+useEffect(() => {
+  const unsubscribe = connection.subscribe("message", handle);
+  return () => unsubscribe();
+}, [connection]);
+```
+
+Think of each run as "start syncing with these values", and the cleanup as "stop syncing with the old values". Without cleanup, every re-run adds another subscription or timer, and old ones keep firing.
+
+Cleanup is also where you mark async work as out of date (see Async Race Conditions).
+
+## Strict Mode runs it twice
+
+In development, `StrictMode` mounts each component, unmounts it, and mounts it again. Your effect runs, its cleanup runs, and it runs again. This is on purpose: it exposes effects with missing cleanup. If your app breaks because of it, the effect is missing cleanup. It doesn't happen in production builds.
+
+## Listing dependencies honestly
+
+Everything from the component that the effect uses (props, state, functions defined in the component) belongs in the array. The `exhaustive-deps` lint rule checks this. Leaving one out means the effect keeps using an old value (see Stale Closures in React).
+
+Some values are **stable**: React guarantees they're the same on every render, so listing them never causes a re-run:
+
+- setter functions from `useState`
+- `dispatch` from `useReducer`
+- ref objects from `useRef`
+
+Including them anyway satisfies the lint rule at no cost.
+
+If a dependency changes too often (an object or function recreated every render), fix the cause: move it inside the effect, outside the component, or stabilise it with `useMemo` or `useCallback`. Don't just remove it from the array.
+
+## A function from the caller
+
+A custom hook that subscribes often takes a function from whoever uses it, so the hook doesn't care where the data comes from:
+
+```tsx
+const guidance = useSmoothGuidance((onMessage) =>
+  connection.subscribe("guidanceUpdated", onMessage),
+);
+```
+
+That arrow function is created anew on every render of the caller. Listing it honestly as a dependency means the effect's cleanup runs and the subscription restarts **on every render**. Leaving it out of the array silences nothing (the lint rule still warns) and the effect keeps the function from the first render.
+
+The way out is to separate "which function is current" from "when to subscribe", using a ref:
+
+```tsx
+const startRef = useRef(start);
+useEffect(() => {
+  startRef.current = start; // after every render where start changed
+}, [start]);
+
+useEffect(() => {
+  const stop = startRef.current(setGuidance); // subscribe once
+  return () => stop();
+}, []); // refs are stable, so nothing is missing
+```
+
+The first effect is cheap: it only swaps what's in the box. The second runs once and reads the box when it subscribes. If the caller later passes a different function, the subscription doesn't restart. That's fine when every function the caller could pass does the same thing (here: subscribe to the same event). If a change should resubscribe, it belongs in the dependency array after all.
+
+Why not `useCallback` in the caller instead? It works, but then every caller has to remember it. With the ref, the hook protects itself.
+
+`useEffectEvent` (React 19.2) is the official name for the same idea: it wraps a function so an effect can call the latest version without listing it.
+
+## Setting state directly in an effect
+
+```tsx
+useEffect(() => {
+  setError(undefined); // flagged by the lint rules
+  register();
+}, [role]);
+```
+
+Setting state synchronously in an effect causes an extra render straight away: render, then the effect sets state, then render again. The newer React lint rules warn about this. Usually there's a better place:
+
+- **Derive it** during render, if it can be calculated.
+- **Set it in the event handler** that caused the change, for example clearing an error in the "close dialog" handler.
+- **Set it in a callback** that runs later, like a subscription or `.then`. That's not flagged, because it isn't synchronous.
+
+## You might not need an effect
+
+Effects are for syncing with things **outside** React. Common misuses:
+
+- Calculating a value from props or state. Calculate it during render.
+- Responding to a user action. Do it in the event handler.
+- Resetting state when a prop changes. Give the component a `key` instead, so React creates a fresh one.
+
+## Takeaway
+
+An effect runs after render, again whenever a dependency changes by `Object.is`, and its cleanup undoes the previous run. Setting a value to the same primitive doesn't re-run it. List every dependency, rely on setters being stable, and keep state updates in handlers or callbacks where possible.
+
+## Open threads for next time
+
+- `useLayoutEffect`, which runs before the browser paints.
+- `useEffectEvent` (React 19.2) in practice: try it in place of a latest-value ref and compare.

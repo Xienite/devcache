@@ -1,0 +1,82 @@
+# Pure vs Impure in React
+
+## Where I started
+
+The `generateValue`/`prevServerValueRef` bug in `PollingSimulation`: a state updater silently produced wrong results under `StrictMode`. Tracking it down meant understanding what "pure" really means and why React cares so much about it.
+
+## What "pure" means here
+
+A pure function: given the same inputs, always returns the same output, and doesn't touch anything outside itself while doing it (no mutating external variables, no network calls, no writing to a ref, not even `console.log`, which is a side effect too, just a harmless one).
+
+```js
+function pure(a, b) {
+  return a + b; // only reads its own arguments, only returns a value
+}
+
+let total = 0;
+function impure(a) {
+  total += a; // mutates something outside itself: a side effect
+  return total;
+}
+```
+
+`impure` can return a different result for the same input `a`, depending on how many times it's already been called. That's the whole problem: its output stops being predictable from its arguments alone.
+
+## Why React cares
+
+React's rendering model assumes your component function and a few specific other functions are pure. React reserves the right to call them more than once, throw away a result, call them out of order, or call them without actually using the result, and it can only safely do that if calling them twice has no observable difference from calling them once.
+
+Two places this rule applies directly:
+
+- **Render** (the component function body itself). React can re-run it for reasons that have nothing to do with your code (Concurrent rendering, Fast Refresh, `StrictMode`), and it assumes doing so is harmless.
+- **State updater functions**, the callback form of a setter, `setX(current => ...)`. React documents that these must be pure, precisely because of what happened here.
+
+## The bug, concretely
+
+```js
+setServer((current) => {
+  const next = generateValue(prevServerValueRef.current, current); // reads outside state
+  prevServerValueRef.current = current;                             // writes outside state
+  return next;
+});
+```
+
+This updater isn't pure: it reads and writes `prevServerValueRef`, something outside its own argument. In dev, `StrictMode` calls state updater functions **twice** per actual update, specifically to catch exactly this kind of impurity (same reasoning as double-invoking render).
+
+Trace what that double-call does here:
+
+1. **1st call**: reads the real `prevServerValueRef` (say `80`), `current = 90`. `generateValue(80, 90)` → not `100`, not `0`, `80 > 90` is false → returns `100`. Side effect: sets `prevServerValueRef.current = 90`.
+2. **2nd call** (same tick, same `current = 90` argument; React re-invokes with the same input to check for a matching output): reads `prevServerValueRef`, but it's now `90` (mutated by call 1, not the original `80`). `generateValue(90, 90)` → `90 > 90` is false → also returns `100`.
+
+React keeps the **second** call's result. So whenever the ref got silently overwritten between the two calls, the second call is comparing `current` against *itself* instead of against the real previous value. The `prev > current` branch (descending) can never fire, because by the time it's checked, `prev` has already been overwritten to equal `current`. That's exactly why the value climbed to `100` and then got stuck flapping `100 → 90 → 100`: at `value === 100` the branch doesn't depend on `prev` at all (both calls agree), but at every other value, the corrupted second call always wins and always picks "ascending."
+
+**Takeaway:** an updater that looks like it's "just computing a number" can still be impure if any part of that computation reads or writes something outside its own arguments (a ref, a closed-over variable, anything). `StrictMode` calling it twice isn't a bug in React; it's the mechanism that surfaces this class of bug during development instead of in production.
+
+## The fix: make the updater self-contained
+
+Bundle whatever the computation needs (`value` *and* `prev`) into the state itself, so the updater only ever reads from its own argument and returns a new object. No external ref involved:
+
+```js
+const [server, setServer] = useState({ value: generateValue(0, 10), prev: 10 });
+
+setServer(({ value, prev }) => ({
+  value: generateValue(prev, value),
+  prev: value,
+}));
+```
+
+Now calling this updater twice with the same `{ value, prev }` input always produces the same output: pure by construction. It genuinely doesn't matter to the caller whether React invokes it once or fifty times.
+
+## The general rule of thumb
+
+If a function is:
+
+- a component body,
+- a function passed to `setState(fn)`,
+- or a function passed to `useState`'s lazy initializer, `useMemo`, or a reducer in `useReducer`,
+
+then React may call it more than once or at unexpected times, and it needs to be pure. `useEffect` bodies and event handlers are the opposite: those are explicitly *where* side effects (mutating refs, `setState` outside the pure paths above, DOM writes, timers) are supposed to live.
+
+## Open threads for next time
+
+- A `StrictMode` page: what it actually double-invokes (render, state updaters, effect setup and cleanup) and why. This is the second bug in `PollingSimulation` traced back to it (the other one was missing timer cleanup, see Recurring Timers in React).

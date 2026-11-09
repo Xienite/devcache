@@ -1,0 +1,134 @@
+# Closures
+
+## Where I started
+
+The word kept coming up as the explanation for unrelated things: why a test could change a value "inside" a wrapper it had already handed over, why an async callback saw an old value, why a cleanup function could flip a flag that only existed inside one effect run. They're all the same idea.
+
+## The definition
+
+A **closure** is a function together with the variables it could see where it was **written**. When a function is created inside another function, it keeps access to the outer function's variables, even after the outer function has returned.
+
+```js
+function makeCounter() {
+  let count = 0;
+  return () => {
+    count++;
+    return count;
+  };
+}
+
+const next = makeCounter();
+next(); // 1
+next(); // 2
+```
+
+`makeCounter` has finished running, so normally `count` would be gone. But the returned arrow function still uses it, so JavaScript keeps it alive. Nothing outside can read or change `count` directly. Only `next` can.
+
+## The rule that matters: variables, not values
+
+A closure doesn't copy the variable's value at the moment it's created. It keeps a reference to the **variable itself**. If the variable changes later, the closure sees the new value.
+
+```js
+let name = "Ada";
+const greet = () => `Hello ${name}`;
+
+name = "Grace";
+greet(); // "Hello Grace", not "Hello Ada"
+```
+
+This is the single most useful thing to remember about closures. Most "why does it see the old value" and "why does it see the new value" questions come back to it.
+
+## Each call gets fresh variables
+
+Every time a function runs, it gets a new set of local variables. So two closures from two calls don't share anything:
+
+```js
+const a = makeCounter();
+const b = makeCounter();
+a(); // 1
+a(); // 2
+b(); // 1, its own count
+```
+
+## The classic loop surprise
+
+```js
+for (var i = 0; i < 3; i++) {
+  setTimeout(() => console.log(i));
+}
+// 3, 3, 3
+```
+
+`var` creates **one** `i` for the whole loop. All three callbacks close over that same variable, and by the time they run, the loop has finished and `i` is 3.
+
+```js
+for (let i = 0; i < 3; i++) {
+  setTimeout(() => console.log(i));
+}
+// 0, 1, 2
+```
+
+`let` creates a **new** `i` for each iteration, so each callback closes over its own. This is one of the main reasons `let` replaced `var`.
+
+## Real uses
+
+### A value you can change from outside
+
+In a test, I needed a wrapper component to provide a role that could change halfway through:
+
+```ts
+let role = initialRole;
+
+const hook = renderHook(() => useSomething(), {
+  wrapper: ({ children }) => (
+    <RoleContext.Provider value={{ role }}>{children}</RoleContext.Provider>
+  ),
+});
+
+role = newRole; // change the variable...
+hook.rerender(); // ...and the wrapper reads the new value when it runs again
+```
+
+The wrapper closes over the variable `role`. Changing the variable doesn't do anything by itself, but the next time the wrapper runs, it reads whatever `role` holds now.
+
+### A flag private to one run
+
+```ts
+useEffect(() => {
+  let stale = false;
+  load().then((data) => {
+    if (!stale) setData(data);
+  });
+  return () => {
+    stale = true;
+  };
+}, [id]);
+```
+
+Each run of the effect creates its own `stale`. The `.then` callback and the cleanup function from that run both close over the **same** one, so the cleanup can tell that run's callback "you're out of date". The next run gets a fresh `stale` and isn't affected. (See the Async Race Conditions page.)
+
+### Keeping a trigger for later
+
+```ts
+let reject;
+const promise = new Promise((_resolve, rej) => {
+  reject = rej;
+});
+// later
+reject(new Error("failed"));
+```
+
+The function passed to `Promise` closes over the outer `reject` variable and stores the real reject function in it. (See the Deferred Promises page.)
+
+## Where closures cause bugs
+
+Because a closure keeps the variable alive, a long-lived closure can see a value that's no longer the one you mean. In React this shows up as a **stale closure**: a callback created during one render still holds that render's state, even after a newer render. That's a big enough topic to get its own page.
+
+## Takeaway
+
+A function remembers the variables from where it was written, and keeps them alive as long as it exists. It remembers the **variable**, not a snapshot of its value, and every call of the outer function creates fresh variables.
+
+## Open threads for next time
+
+- Memory: closures keep variables alive, so a forgotten event listener can keep large objects from being freed.
+- How `this` differs: arrow functions take `this` from where they're written, much like a closed-over variable (see Passing vs Calling a Function).

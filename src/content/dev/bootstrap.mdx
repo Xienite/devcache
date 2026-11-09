@@ -1,0 +1,87 @@
+# Bootstrap and the Composition Root
+
+## Where I started
+
+Working on the tandem lift frontend, I asked what the point of the `main.tsx` and `App.tsx` split even is. The architecture doc also had a box labelled "App bootstrap (main.tsx), composition root" and I couldn't say what either term meant.
+
+Not to be confused with **Bootstrap the CSS framework**. Same word, unrelated thing.
+
+## The word
+
+"Bootstrapping" comes from "pulling yourself up by your bootstraps": getting something running from nothing. It's also where "booting" a computer comes from. In web dev, the **bootstrap** is the startup code that runs once, before the actual app, to get the app going.
+
+## What it looks like in a Vite + React app
+
+The chain starts in `index.html`:
+
+```html
+<div id="root"></div>
+<script type="module" src="/src/main.tsx"></script>
+```
+
+The browser loads `main.tsx`, and `main.tsx` does the bootstrapping:
+
+```tsx
+import { StrictMode } from "react";
+import { createRoot } from "react-dom/client";
+import "./index.css"; // global styles
+import "./i18n"; // initialises i18next
+import App from "./App.tsx";
+
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <App />
+  </StrictMode>,
+);
+```
+
+Three kinds of things happen here:
+
+- **Side-effect imports.** `import "./index.css"` and `import "./i18n"` don't give me anything to use. Importing them just *runs* them. Imports run top to bottom, so order matters: i18n is set up before anything renders.
+- **Mounting.** `createRoot(...).render(...)` is the bridge from the plain DOM into React. Before this line, React doesn't exist on the page.
+- **Dev wrappers** like `StrictMode`.
+
+## main.tsx vs App.tsx
+
+`main.tsx` **starts** the app. `App.tsx` **is** the app.
+
+Rule of thumb: if it happens *to the page*, it goes in `main`. If it's *part of the React tree*, it goes in `App` and below.
+
+Keeping them apart means `App` doesn't depend on a real `#root` element or on global setup running again. A test can just render `<App />`. That's also why app-level providers often sit inside `App` instead of `main`: a test rendering `<App />` gets them for free.
+
+## The composition root
+
+The bootstrap is also the natural place for the **composition root**: the one spot where concrete implementations are picked and plugged together.
+
+In the tandem lift frontend, the logic layer only knows a `TelemetrySource` interface. There's a real SignalR implementation and a mock one. The choice between them happens once, at startup:
+
+```ts
+const source: TelemetrySource = useMock
+  ? createMockSource()
+  : createSignalRSource(connection);
+```
+
+Everything else just receives a `TelemetrySource` and never knows which one it got. Swapping real for mock is a one-line change in one file.
+
+The backend does the same thing. ASP.NET Core's `Program.cs` is its bootstrap and its composition root:
+
+```csharp
+builder.Services.AddSingleton<ITelemetryBroadcaster, SignalRTelemetryBroadcaster>();
+```
+
+"Whoever asks for an `ITelemetryBroadcaster` gets a `SignalRTelemetryBroadcaster`." Decided once, at startup, in one place.
+
+## What doesn't belong in the bootstrap
+
+- Business logic. It should be testable without starting the app.
+- Anything that needs React state or hooks. Those only exist inside components, i.e. from `App` downward.
+
+## Takeaway
+
+The bootstrap is the run-once startup code (`main.tsx`, `Program.cs`). The composition root is the one place inside it where concrete pieces get chosen and wired together, so the rest of the code only deals with interfaces.
+
+Related: the Singleton page, since "create it once at startup and pass it down" is the alternative to a singleton.
+
+## Open threads for next time
+
+- Where exactly the tandem SignalR connection gets created (`main.tsx` or `App`) and how components reach it.

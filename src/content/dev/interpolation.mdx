@@ -1,0 +1,100 @@
+# Smoothing Between Samples
+
+## Where I started
+
+The crane HUD gets one guidance message per second, but the screen draws 60 frames per second. Drawing each message as it arrives made the target zone teleport once a second. My first fix made it glide to each new position, which still looked like a teleport, just a slower one. Getting to one fluid movement needed three ideas: easing, frame-rate independence and prediction.
+
+## Lerp: a point between two values
+
+**Linear interpolation** (lerp) picks a point between `a` and `b`:
+
+```ts
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+
+lerp(10, 20, 0);   // 10
+lerp(10, 20, 0.5); // 15
+lerp(10, 20, 1);   // 20
+```
+
+`t` is "how far along", from 0 to 1. Everything below is built on this one line.
+
+## Easing: close part of the gap every frame
+
+Instead of jumping to the target, move a fraction of the remaining distance each frame:
+
+```ts
+shown += (target - shown) * a;
+```
+
+That's a lerp from `shown` to `target`, applied again every frame. With `a = 0.1`, the value covers 10% of the gap, then 10% of what's left, and so on. It moves fast at first and slows down as it arrives, which looks natural.
+
+`shown` has to **survive between frames**. A variable created fresh each frame has no memory, and `a * target` alone just draws the value at 10% of the target forever.
+
+## Frame-rate independence
+
+Frames aren't all the same length (a 120 Hz screen, a lag spike). A fixed `a` closes the gap faster on faster screens. The fix scales `a` by the frame time `dt` in seconds:
+
+```ts
+const a = 1 - Math.exp(-dt / tau);
+```
+
+You don't need to derive it. Read `tau` (the **time constant**) as: "after `tau` seconds, about two thirds of the gap is closed, whatever the frame rate." Bigger feels heavier, smaller feels snappier.
+
+## Why easing alone still pulses
+
+Easing toward the **last message** has a fixed endpoint. With `tau = 0.1` the value arrives within about 0.3 s and then sits still until the next message: glide, stop, glide, stop.
+
+Raising `tau` to about the message interval (1 s) makes it look perfectly fluid, but now the value **trails** a moving target by about `tau`. Add the message's own age and the display is 1 to 2 s behind reality. For a value someone steers by, that's too much: they correct, see nothing, and over-correct.
+
+## Prediction: ease toward a moving guess
+
+Fluid motion without lag means the target itself has to keep moving between messages. When a message arrives, measure the speed from the previous one:
+
+```ts
+speed = (newValue - oldValue) / secondsBetweenMessages;
+```
+
+Each frame, guess where the value is **now**, and ease toward the guess:
+
+```ts
+const age = (now - arrivedAt) / 1000;
+const guess = lastValue + speed * age;
+shown += (guess - shown) * a;
+```
+
+The guess carries the motion. The easing, now with a short `tau`, only smooths the small error when a new message shows the guess was a bit off. This is **dead reckoning**: navigating by last known position plus speed.
+
+| time | event | value |
+|---|---|---|
+| 0.0 s | message | 1.0 |
+| 1.0 s | message | 1.2, so speed = 0.2 m/s |
+| 1.5 s | no message, guess 1.2 + 0.2 × 0.5 | 1.3 |
+| 2.0 s | message says 1.38, guess was 1.4 | easing absorbs the 0.02 |
+
+Three details:
+
+- **Order in the handler:** compute the speed from the *old* stored values first, then overwrite them. Swapped, you compare the new message with itself and the speed is always 0.
+- **Stalled feed:** if no message has arrived for a while (say 1.5 s), stop extrapolating. Otherwise the value drifts off forever.
+- **First message:** there's no speed yet, and no meaningful `shown`. Set `shown` straight to the first value, or it flies in from 0.
+
+The cost of prediction is **overshoot** when the motion reverses: the guess keeps going until the next message says otherwise. Test it with realistic data. A mock that jumps 57° around a circle per tick (`Math.sin(t)` with `t` counting seconds) makes any prediction look broken.
+
+## Smooth the picture, not the number
+
+A position the eye tracks should be fluid. A number someone reads should not: a label changing 60 times a second is unreadable. Aircraft displays rate-limit their digits on purpose. Show numbers as they arrive.
+
+## Dead band: ignore the noise around zero
+
+Real values never sit at exactly 0. If a cue lights up whenever a value is non-zero, it flickers as the value jitters around 0. A **dead band** treats everything within a small range as zero. It can be:
+
+- **absolute:** ignore anything below a fixed amount, like a joystick's dead zone,
+- **relative:** ignore an axis that's small compared to the other one. Adapts to the size of the error, but can hide a real, proportionally small value.
+
+## Takeaway
+
+Ease with `shown += (target - shown) * a` and make `a` depend on frame time. Easing toward a fixed point still pulses, and a long time constant buys smoothness with lag. For fluid motion without lag, extrapolate a guess from the last two samples and ease toward that. Smooth what the eye follows, not what it reads, and use a dead band to stop noise from triggering anything.
+
+## Open threads for next time
+
+- Using a known input (joystick position) to predict the speed before the next sample confirms it (feedforward).
+- Interpolating angles: 359° to 1° is 2°, not 358°.

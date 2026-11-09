@@ -1,0 +1,127 @@
+# Type Assertions
+
+## Where I started
+
+I saw three different exclamation marks and an `as` in one codebase:
+
+```ts
+createRoot(document.getElementById("root")!);
+let reject!: (error: Error) => void;
+const receiver = new Proxy({}, handler) as Receiver;
+```
+
+All of them are **assertions**: places where I tell TypeScript something it can't work out itself, and it believes me.
+
+## Narrowing vs asserting
+
+- **Narrowing** proves something with a runtime check. If the check is wrong, the code behaves accordingly (see the Type Narrowing page).
+- **Asserting** just states it. Nothing runs at runtime. If the statement is wrong, TypeScript is wrong too, and you find out from a crash.
+
+So assertions move responsibility from the compiler to you. Use them when you genuinely know more than TypeScript, not to silence an error you don't understand.
+
+## `as`: "treat this as that type"
+
+```ts
+const input = document.querySelector("#email") as HTMLInputElement;
+input.value; // allowed
+```
+
+`querySelector` returns a general `Element | null`. You know it's an input, so you say so.
+
+TypeScript only allows `as` between types that **could** overlap. Converting a `string` to a `number` with `as` is an error. The escape hatch `as unknown as X` forces any conversion, and is almost always a sign something is wrong.
+
+`as` doesn't convert anything. `"5" as unknown as number` is still the string `"5"` at runtime.
+
+## `value!`: the non-null assertion
+
+An `!` **after a value** removes `null` and `undefined` from its type:
+
+```ts
+const root = document.getElementById("root")!; // HTMLElement, not HTMLElement | null
+```
+
+It means "I know this isn't null". If it is, the next line crashes with "Cannot read properties of null". Fine for something like the root element of your own `index.html`. Risky for anything that can really be missing.
+
+## `let x!: T`: the definite assignment assertion
+
+An `!` **after a variable name in a declaration** is a different thing:
+
+```ts
+let reject!: (error: Error) => void;
+```
+
+It means "I know this will be assigned before it's used". You need it when the assignment happens somewhere TypeScript can't follow.
+
+### What TypeScript can follow
+
+TypeScript checks that every variable is assigned before it's read, along every possible path. This is **definite assignment analysis**:
+
+```ts
+let id: string;
+
+if (canUseUuid) {
+  id = crypto.randomUUID();
+} else {
+  id = fallbackId();
+}
+
+save(id); // fine: both paths assign id
+```
+
+Remove the `else` and TypeScript reports "Variable 'id' is used before being assigned", because one path skips the assignment.
+
+### What it can't follow
+
+It doesn't look into callbacks, because it can't know when or whether they run:
+
+```ts
+let reject: (error: Error) => void;
+
+new Promise((_resolve, rej) => {
+  reject = rej; // inside a callback
+});
+
+reject(new Error()); // error: used before being assigned
+```
+
+In reality the `Promise` executor runs immediately, so `reject` **is** assigned. You know it, TypeScript doesn't, so `let reject!:` is the honest fix (see Deferred Promises).
+
+### Why not `| undefined` instead?
+
+```ts
+let reject: ((error: Error) => void) | undefined;
+reject?.(new Error());
+```
+
+This compiles without an assertion, but if the assignment never happened, `?.` silently does nothing. In a test, that could make a test pass without ever doing its job. With `!`, a mistake crashes loudly. Sometimes loud is what you want.
+
+## `as const` is different
+
+Despite the `as`, `as const` doesn't override anything. It asks TypeScript to infer the **narrowest** possible type for a literal (see Types from Values). It's safe.
+
+## `satisfies`: checking without changing
+
+When you want TypeScript to check a value against a type but keep the value's own, more precise type, use `satisfies` instead of `as` or an annotation:
+
+```ts
+const colours = {
+  primary: "#004a8f",
+  danger: "#c00",
+} satisfies Record<string, string>;
+
+colours.primary; // still known to exist
+```
+
+With `as`, a typo in the object would be accepted. With `satisfies`, it's an error.
+
+## When an assertion is reasonable
+
+- The DOM or a library returns a general type and you know the specific one.
+- An assignment happens in a callback TypeScript can't follow, like the Promise executor.
+- A dynamic object, like a `Proxy`, that TypeScript can't analyse, and you accept losing checking on it.
+
+Each time, ask: if I'm wrong, how will I find out? If the answer is "a confusing bug much later", narrow with a real check instead.
+
+## Takeaway
+
+Assertions (`as`, `value!`, `let x!:`) tell TypeScript to believe you, and they do nothing at runtime. Narrowing proves things with real checks. Prefer narrowing, and use an assertion only when you truly know something the compiler can't see.

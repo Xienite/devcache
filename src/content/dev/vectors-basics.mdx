@@ -1,0 +1,77 @@
+# Vectors: Length and Direction
+
+## Where I started
+
+On the crane HUD, a line shows where the operator pushes the stick, ending in a small ring. I wanted the ring's **edge** to sit exactly at the line's tip, at every angle. Offsets only worked for one angle. The fix was a unit vector, which sounded familiar but I'd misremembered what it is.
+
+## A vector is just a pair
+
+`(x, y)` is a point, or an arrow from `(0, 0)` to that point. The stick at `(slew, luff)` already **is** one location, so there's nothing to "combine". Use both numbers as coordinates.
+
+## Length: Pythagoras
+
+```ts
+const len = Math.hypot(x, y); // √(x² + y²)
+```
+
+For `(0.3, 0.4)` that's √(0.09 + 0.16) = 0.5. You need the length for questions about **size**: "is the stick pushed more than 5%?", "how far is the point from the centre?". You don't need it for the position itself.
+
+## Square or circle threshold
+
+"Is this vector small?" can be asked two ways:
+
+```ts
+Math.abs(x) > 0.05 || Math.abs(y) > 0.05  // a square around the centre
+Math.hypot(x, y) > 0.05                   // a circle around the centre
+```
+
+They differ only on small diagonals: `(0.04, 0.04)` is inside the square but has length 0.057, outside the circle. Either is fine for a threshold. Forgetting `Math.abs` is the real bug: `x > 0.05` ignores every negative direction.
+
+## Unit vector: direction without size
+
+A **unit vector** is an arrow of length exactly 1. It holds only a direction. You get it by dividing **both** components by the length (**normalising**):
+
+```ts
+const dirX = x / len; // (0.3, 0.4) / 0.5
+const dirY = y / len; // = (0.6, 0.8), length 1
+```
+
+Like dividing by 100 to get 1% of something: you find what "one unit" of this arrow looks like, and can scale it to any length from there.
+
+Dividing both components by the **same** number keeps their ratio (3:4), and the ratio is the direction. Scaling only one would bend the arrow.
+
+## Moving along a direction
+
+Multiply the unit vector by a distance to get an arrow of that length, then add it to a point:
+
+```ts
+const stepX = r * dirX;
+const stepY = r * dirY;
+
+// ring centre one radius beyond the tip, whatever the angle
+const ringX = x + stepX;
+const ringY = y + stepY;
+```
+
+Subtracting instead moves backwards along the line, for example to stop a line at a ring's edge. Watch for the line flipping when it's shorter than the step.
+
+Dividing by `len` needs `len > 0`. A threshold that hides tiny vectors usually guarantees that already.
+
+## From an angle: cos and sin
+
+The components of a unit vector **are** the cosine and sine of its angle:
+
+```ts
+const dir = { x: Math.cos(angle), y: Math.sin(angle) }; // angle in radians
+```
+
+So when you start from an angle instead of from `x` and `y`, you already have the unit vector. Turning it 90° gives the perpendicular: `(-sin, cos)`.
+
+## Takeaway
+
+A vector is an `(x, y)` pair. `Math.hypot` gives its length, dividing both components by the length gives a unit vector (direction only), and multiplying that by a distance moves you exactly that far in that direction. `(cos a, sin a)` is the same thing, starting from an angle.
+
+## Open threads for next time
+
+- Dot product: how "aligned" two directions are (is the operator steering toward the target?).
+- `Math.atan2(y, x)` for going back from a vector to its angle.

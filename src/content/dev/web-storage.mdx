@@ -1,0 +1,107 @@
+# Web Storage
+
+## Where I started
+
+A tablet app needed to remember two things: which role the user picked, so a reload doesn't send them back to the start, and a device ID that never changes. Both are small strings that must survive a reload, which is exactly what Web Storage is for.
+
+## Two stores with the same API
+
+The browser gives every site two key/value stores:
+
+- **`localStorage`** survives reloads, closing the tab and restarting the browser. It lasts until the site or the user clears it, and every tab of the same origin shares it.
+- **`sessionStorage`** survives reloads, but is gone when the tab closes. Each tab has its own.
+
+Pick by how long the value should live. A "seen the safety notice" flag that should reappear in each new session belongs in `sessionStorage`. A device ID that must stay the same forever belongs in `localStorage`.
+
+## The API
+
+```js
+localStorage.setItem("theme", "dark");
+localStorage.getItem("theme");     // "dark"
+localStorage.getItem("missing");   // null
+localStorage.removeItem("theme");
+localStorage.clear();              // everything for this origin
+```
+
+Three rules to remember:
+
+**Strings only.** Whatever you store is converted to a string:
+
+```js
+localStorage.setItem("count", 5);
+localStorage.getItem("count"); // "5", a string
+localStorage.setItem("user", { name: "Ada" });
+localStorage.getItem("user");  // "[object Object]"
+```
+
+For objects, convert to JSON yourself:
+
+```js
+localStorage.setItem("user", JSON.stringify(user));
+const user = JSON.parse(localStorage.getItem("user"));
+```
+
+**Missing keys give `null`**, not `undefined`. Check for that.
+
+**It's synchronous.** Reading and writing block the page until done. That's fine for small values, but not for large data.
+
+## The origin rule
+
+Storage belongs to an **origin**: the scheme, host and port together. These are all different origins, each with its own separate store:
+
+- `http://localhost:5173`
+- `http://localhost:4173`
+- `http://192.168.1.20:5173`
+- `https://example.com`
+
+Two tabs on the **same** origin share one `localStorage`. That catches people when testing: two tabs of the same app in one browser see the same stored values, so if you store a device ID, both tabs are "the same device". Use a second browser or a private window to simulate a second device.
+
+## Treat stored data as untrusted
+
+Whatever is in storage may be from an older version of your app, edited by hand in DevTools, or corrupted. Don't trust its shape:
+
+```ts
+function parseSettings(raw: string | null): Settings | null {
+  if (raw === null) return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    // check the shape before using it, see the Type Narrowing page
+  } catch {
+    return null; // not valid JSON
+  }
+}
+```
+
+`JSON.parse` throws on invalid text, so wrap it in `try`.
+
+## Things that can go wrong
+
+- **Size limit**: around 5 MB per origin in most browsers. Writing past it throws a `QuotaExceededError`.
+- **Storage can be unavailable**: some privacy settings block it, and it can throw when accessed. For anything critical, wrap access in `try`/`catch`.
+- **It isn't secret**: any script on the page can read it, including a malicious one if the site has an XSS hole. Don't store passwords or tokens you can't afford to leak.
+- **Not available outside a browser**: in Node, `localStorage` doesn't exist, so code that uses it needs a browser-like environment in tests (see Unit Testing Basics with Vitest).
+
+## Reacting to changes in other tabs
+
+When another tab changes `localStorage`, every other tab of the same origin gets a `storage` event:
+
+```js
+window.addEventListener("storage", (event) => {
+  console.log(event.key, event.oldValue, event.newValue);
+});
+```
+
+The tab that made the change does **not** get the event.
+
+## Seeing it
+
+DevTools → Application → Local Storage (or Session Storage) shows every key and value for the current origin, and lets you edit or delete them.
+
+## Takeaway
+
+Web Storage is a small, synchronous, string-only key/value store per origin. `localStorage` lasts until it's cleared, `sessionStorage` lasts as long as the tab. Convert objects with JSON, expect `null` for missing keys, and validate whatever you read back.
+
+## Open threads for next time
+
+- IndexedDB, the asynchronous browser database for larger or structured data.
+- Cookies: also storage, but sent to the server with every request.

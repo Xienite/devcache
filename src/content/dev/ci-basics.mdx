@@ -1,0 +1,73 @@
+# CI Basics
+
+## Where I started
+
+"CI stuff" was a black box that made PRs go green or red. I didn't know where it was defined, or that I'd been using it the whole time.
+
+## What it actually is
+
+CI (Continuous Integration) means a robot builds and checks every proposed change automatically. On GitHub that's **GitHub Actions**: a YAML file in `.github/workflows/`. When its trigger happens, GitHub starts a fresh virtual machine, runs the steps, and puts a green check or red X on the PR.
+
+The core of ours, trimmed:
+
+```yaml
+on:
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - "frontend/**"
+
+jobs:
+  lint-and-build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run build
+```
+
+- `on`: when it runs. Here: PRs into `develop` or `main`, but only if something under `frontend/` changed. That `paths` filter is why a backend-only PR never runs the frontend checks.
+- `jobs`: groups of steps. Each job gets its own clean machine.
+- `uses`: borrow a prebuilt step. `checkout` downloads the code, `setup-node` installs Node.
+- `run`: a shell command. If one exits non-zero (exit codes again), the job fails and later steps are skipped.
+- `working-directory: frontend`: same monorepo question as with hooks. `package.json` is in `frontend/`.
+
+## npm ci versus npm install
+
+`npm install` may update the lock file and pull newer versions. `npm ci` installs exactly what `package-lock.json` says and errors if it disagrees with `package.json`. CI wants the same result every time, so it uses `npm ci`.
+
+## Three places formatting can be enforced
+
+- **Editor on save:** easy, ignorable.
+- **Git hook:** automatic, but skippable (`--no-verify`) or missing if `npm install` was never run.
+- **CI:** runs on GitHub's machines for every PR. Nothing local can bypass it.
+
+The first two make it easy. CI makes it certain.
+
+## The trace that made it click
+
+After adding the formatting step, the PR went green. That doesn't prove the check works, because a typo could make it pass forever. So we tested it: committed an unformatted file with `--no-verify`, opened a throwaway draft PR, and watched CI go red at exactly the "Check formatting" step, naming the file. Then closed the PR and deleted the branch.
+
+**Takeaway:** a check that has never failed hasn't been proven. Make it fail once on purpose.
+
+## My question: does the PR run against develop or my branch?
+
+Both, in a way. GitHub checks out a temporary merge of my branch with the target branch, not my branch alone. So CI answers "will this work after merging?", which catches the case where two branches are each fine but break each other.
+
+Related trap: `branches` under `pull_request` means the branch the PR **targets**. Our feature PRs go into `develop`, so a workflow that only listed `main` would silently never run on them.
+
+## Red does not mean blocked
+
+A failing check shows a red X, but GitHub still lets someone click merge. To actually block it, turn on **branch protection** for the branch and mark the job as a required status check. Until then, CI is advisory.
+
+## Open threads for next time
+
+- Branch protection isn't enabled on `develop` yet.
+- What does a deploy workflow look like (merging `develop` into `main` triggers the demo server)? Haven't read that one.
+- Caching, matrix builds, secrets: haven't touched them.

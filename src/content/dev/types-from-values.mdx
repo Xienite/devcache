@@ -1,0 +1,169 @@
+# Types from Values
+
+## Where I started
+
+A wizard had three steps. I needed the list of steps at runtime (to count them and go to the next one) and a type for "a step name" (so a typo like `"rigs"` would be an error). Writing both by hand means two lists that can drift apart:
+
+```ts
+const STEPS = ["pairing", "site", "rigging"];
+type Step = "pairing" | "site" | "rigging"; // the same list again
+```
+
+TypeScript can derive the type **from** the value instead, so there's only one list to maintain.
+
+## The problem: TypeScript widens
+
+```ts
+const STEPS = ["pairing", "site", "rigging"];
+// type: string[]
+```
+
+TypeScript assumes you might push other strings into the array later, so it **widens** the type to `string[]`. The specific names are lost.
+
+## `as const`: keep it exact
+
+```ts
+const STEPS = ["pairing", "site", "rigging"] as const;
+// type: readonly ["pairing", "site", "rigging"]
+```
+
+`as const` tells TypeScript "this will never change, so infer the narrowest type". You get:
+
+- **Literal types**: `"pairing"`, not `string`.
+- **A tuple**: a fixed length, with a known type at each position.
+- **`readonly`**: TypeScript won't let you `push` or reassign items.
+
+It works on objects too, making every property `readonly` with its literal type:
+
+```ts
+const config = { mode: "dark", retries: 3 } as const;
+// { readonly mode: "dark"; readonly retries: 3 }
+```
+
+Despite the `as`, this isn't an assertion that overrides checking. It's an instruction about inference (see Type Assertions).
+
+## `typeof`: the type of a value
+
+In a type position, `typeof someValue` gives that value's type:
+
+```ts
+type Steps = typeof STEPS;
+// readonly ["pairing", "site", "rigging"]
+```
+
+This `typeof` is TypeScript's, used in types. It's different from JavaScript's runtime `typeof` that returns `"string"`.
+
+## `[number]`: the type of any item
+
+Indexing a type with `number` asks "what type is at any numeric index?". For a tuple, that's all its item types combined:
+
+```ts
+type Step = (typeof STEPS)[number];
+// "pairing" | "site" | "rigging"
+```
+
+Now there's one list. Add a step to `STEPS`, and `Step` includes it automatically.
+
+The same idea gives you the keys or values of an object:
+
+```ts
+const CRANE_NUMBERS = { Crane1: 1, Crane2: 2 } as const;
+
+type CraneId = keyof typeof CRANE_NUMBERS;              // "Crane1" | "Crane2"
+type CraneNumber = (typeof CRANE_NUMBERS)[CraneId];     // 1 | 2
+```
+
+## Using it
+
+```ts
+const step: Step = STEPS[index];
+
+const titles: Record<Step, string> = {
+  pairing: "Crane pairing",
+  site: "Site calibration",
+  rigging: "Load rigging",
+};
+```
+
+## The other direction: `Record` to force completeness
+
+Sometimes the type comes first and you want a compile error when a value list is incomplete. `Record<Keys, Value>` requires **every** key:
+
+```ts
+type CraneId = "Crane1" | "Crane2";
+
+const CRANES: Record<CraneId, true> = {
+  Crane1: true,
+  Crane2: true,
+};
+```
+
+If someone adds `"Crane3"` to `CraneId`, this object stops compiling until it's added here too. That's a cheap way to find every place that needs updating. The `true` values don't matter. The object exists so that its keys are checked, and can also be used at runtime, for example with `Object.hasOwn(CRANES, value)` (see Type Narrowing).
+
+## Exhaustive `switch` with `never`
+
+The same "make the compiler find the missing case" trick works in a `switch`:
+
+```ts
+function label(step: Step): string {
+  switch (step) {
+    case "pairing": return "Pairing";
+    case "site": return "Site";
+    case "rigging": return "Rigging";
+    default: {
+      const unreachable: never = step;
+      return unreachable;
+    }
+  }
+}
+```
+
+After all cases, TypeScript has narrowed `step` to `never`, meaning "no value left". If a new step is added and not handled, `step` is that new string in the `default` branch, and assigning it to `never` is an error.
+
+## Lookup tables instead of branches
+
+When several cases run the **same logic** and only differ in a few facts, put the facts in an object and write the logic once. Four correction cues (up, down, left, right) first looked like this:
+
+```ts
+if (direction === "up" || direction === "down") {
+  if (direction === "up" && luff > 0) value = luff;
+  else if (direction === "down" && luff < 0) value = luff;
+}
+// …and the same again for left and right
+```
+
+Only two facts differ per direction: which field, and which sign. As a table:
+
+```ts
+const CUES = {
+  up:    { field: "correctionLuffM", sign: 1 },
+  down:  { field: "correctionLuffM", sign: -1 },
+  left:  { field: "correctionSlewM", sign: -1 },
+  right: { field: "correctionSlewM", sign: 1 },
+} as const;
+
+function cueValue(direction: keyof typeof CUES) {
+  const cue = CUES[direction];
+  const value = guidance[cue.field];
+  return value * cue.sign > 0 ? Math.abs(value) : undefined;
+}
+```
+
+Multiplying by the sign turns "positive for up, negative for down" into one comparison. `as const` keeps `"correctionLuffM"` as a literal, so `guidance[cue.field]` is type-checked, and `keyof typeof CUES` gives `"up" | "down" | "left" | "right"` without writing the union twice. Adding a case is adding a row.
+
+Define the table **outside** the component, since it never changes. The same pattern maps a status to a style:
+
+```ts
+const STATUS_STYLE: Record<Status, { opacity: number }> = { … };
+```
+
+Here `Record` makes the compiler insist on a row for every status.
+
+## Takeaway
+
+Write the list once as a value with `as const`, and derive types from it with `typeof` and `[number]` or `keyof`. When the type comes first, use `Record<Union, ...>` or a `never` check so the compiler points at everything that needs updating. When branches only differ in data, move the data into a table and keep one copy of the logic.
+
+## Open threads for next time
+
+- `satisfies` combined with `as const`, to check an object's shape and keep its literal types.
+- Mapped types, for building new object types from a union of keys.

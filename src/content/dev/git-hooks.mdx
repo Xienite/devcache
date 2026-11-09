@@ -1,0 +1,119 @@
+# Git Hooks
+
+## Where I started
+
+Only knew Husky as a name I'd heard. No idea what it did, or whether I even needed it. Turns out the real question is: how do you make a check run automatically on every teammate's machine?
+
+## The problem hooks have
+
+A Git hook is a script Git runs at a specific moment. The useful one here is `pre-commit`: it runs right before a commit is created, and if it fails, the commit is cancelled.
+
+Hooks live in `.git/hooks/`, but `.git` is never shared. A hook placed there exists only on my machine, and a teammate who clones the repo gets nothing.
+
+The fix: keep the hook script in the repo as a normal tracked file, and tell Git to look there:
+
+```bash
+git config core.hooksPath frontend/.husky/_
+```
+
+That setting lives in my clone's `.git/config`.
+
+## Husky: what it actually does
+
+**Husky** keeps the scripts in a `.husky/` folder in the repo and sets `core.hooksPath` for me. It does that through npm: a `package.json` script named `prepare` runs automatically after `npm install`.
+
+```json
+"scripts": {
+  "prepare": "cd .. && husky frontend/.husky"
+}
+```
+
+So a teammate runs `npm install` like they always would, and gets the hook for free.
+
+## lint-staged: only the files I'm committing
+
+Formatting the whole project on every commit is slow, and it rewrites files I never touched. **lint-staged** takes the files staged for the commit, matches them against patterns, and runs commands on just those:
+
+```json
+"lint-staged": {
+  "*.{ts,tsx}": ["prettier --write", "oxlint"],
+  "*.{css,json,md,html}": "prettier --write"
+}
+```
+
+It re-stages whatever the commands changed, so the formatted version is what gets committed. If any command fails, the commit is cancelled and my files stay staged. The hook script itself is one line:
+
+```bash
+cd frontend && npx lint-staged
+```
+
+## Committing part of a file
+
+Sometimes a file has two unrelated changes and only one belongs in this commit. Git can stage individual **hunks** (blocks of changed lines) instead of whole files:
+
+```bash
+git add -p src/showcase.tsx
+```
+
+`-p` (patch) shows each hunk and asks what to do: `y` to stage it, `n` to skip it, `s` to split it into smaller hunks, `q` to stop. The file is then **partly staged**: some changes are in the next commit, the rest stay in the working folder. `git diff --staged` shows exactly what will be committed.
+
+So what does lint-staged do with a file like that? It must not format and commit the changes I deliberately left out. Its output during a commit shows the steps:
+
+```
+✔ Backing up original state…
+✔ Hiding unstaged changes to partially staged files…
+✔ Running tasks for staged files…
+✔ Staging changes from tasks…
+✔ Restoring unstaged changes…
+```
+
+1. It makes a backup, so a failed run can put everything back.
+2. It temporarily **hides** the unstaged changes, so the working file matches exactly what's staged.
+3. It runs Prettier and the linter on that version.
+4. It stages whatever the tools changed.
+5. It brings back the hidden changes, still unstaged.
+
+So partial commits stay partial, even with formatting on commit.
+
+## The trace that made it click
+
+Test: commit a deliberately ugly file.
+
+```javascript
+export const   x = {a:1,
+ b:'two'}
+```
+
+The committed version was `export const x = { a: 1, b: "two" };`. Nobody ran the formatter. The hook did it between `git commit` and the commit existing.
+
+## The monorepo gotcha
+
+Husky wants to live where `.git` is. Our Git root is `tandem-lift-assist/`, but `package.json` is one level down in `frontend/`. So the `prepare` script has to `cd ..` first, and the hook has to `cd frontend` before running lint-staged.
+
+When tooling acts weird in a monorepo, the first question is: which folder is this command running in?
+
+Same lesson, a different way: I accidentally ran `npm install` in the repo root. npm created a stray `node_modules` there and recorded nothing, because there was no `package.json`. `npm install` goes into whichever folder you run it in.
+
+## My question: do teammates have to reinstall on every new branch?
+
+No. `core.hooksPath` is stored in the clone, and `node_modules` sits in the working folder. Neither belongs to a branch. One `npm install` per clone, and again only when `package.json` dependencies change.
+
+## What a hook can't do
+
+- It can be skipped with `git commit --no-verify`.
+- It doesn't exist for anyone who never ran `npm install`.
+
+So a hook is a convenience. The guarantee comes from CI (see the CI Basics page).
+
+## A mistake worth remembering
+
+During setup, `git reset --hard HEAD~1` was used to delete a throwaway test commit. It removed the commit, but `--hard` also wipes every uncommitted change to tracked files, so unrelated work in progress was lost and had to be redone. To undo just the last commit and keep the work: `git reset --soft HEAD~1` (changes stay staged) or `git reset HEAD~1` (changes stay unstaged).
+
+## Takeaway
+
+Husky puts the hook in the repo, lint-staged limits it to staged files, and `npm install` is what turns it on.
+
+## Open threads for next time
+
+- Haven't tested what the hook does on an old branch that has no `.husky/pre-commit`. Probably nothing, but not confirmed.
+- A fresh-clone test (clone, one `npm install`, try a messy commit) would prove the whole chain.

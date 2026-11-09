@@ -1,0 +1,202 @@
+# Type Narrowing
+
+## Where I started
+
+A caught error had the type `any`, a value read from storage was just a string, and a role from a toggle button was "some string" while my functions wanted exactly `"Crane1"` or `"Crane2"`. In each case I had a value with a **wide** type and needed proof it was something more specific. That proof is narrowing.
+
+## The idea
+
+**Narrowing** is TypeScript working out a more specific type from a check you wrote. Inside the branch where the check passed, the variable has the narrower type:
+
+```ts
+function show(value: string | number) {
+  if (typeof value === "string") {
+    value.toUpperCase(); // here, value is a string
+  } else {
+    value.toFixed(2);    // here, value is a number
+  }
+}
+```
+
+The type of `value` is different on different lines. TypeScript follows the code paths (`if`, `else`, `return`, `switch`) and keeps track of what's been ruled out. This is called **control flow analysis**.
+
+## The checks TypeScript understands
+
+### `typeof`
+
+For primitives: `"string"`, `"number"`, `"boolean"`, `"bigint"`, `"symbol"`, `"undefined"`, `"function"` and `"object"`.
+
+One famous quirk: `typeof null` is `"object"`. A check for objects must also rule out `null`:
+
+```ts
+if (typeof value === "object" && value !== null) {
+  // a real object
+}
+```
+
+### Truthiness
+
+```ts
+function greet(name: string | undefined) {
+  if (name) {
+    name.length; // string
+  }
+}
+```
+
+Careful: this also rules out `""`, because the empty string is falsy (see Short-Circuit Operators).
+
+### Equality
+
+```ts
+if (role === "Supervisor") {
+  // role is exactly "Supervisor"
+}
+```
+
+### `instanceof`
+
+For values created from a class:
+
+```ts
+if (e instanceof Error) {
+  e.message; // e is an Error
+}
+```
+
+### `in`
+
+Checks whether an object has a property, and narrows unions by it:
+
+```ts
+type Fish = { swim(): void };
+type Bird = { fly(): void };
+
+function move(animal: Fish | Bird) {
+  if ("swim" in animal) animal.swim();
+  else animal.fly();
+}
+```
+
+### Discriminated unions
+
+Give every member of a union a shared property with a different literal value, and checking it narrows to one member:
+
+```ts
+type RoleSelection =
+  | { role: "Supervisor" }
+  | { role: "Operator"; crane: "Crane1" | "Crane2" | null };
+
+if (selection.role === "Operator") {
+  selection.crane; // only exists on the Operator member, now allowed
+}
+```
+
+This is the most useful pattern for modelling state that comes in different shapes.
+
+## Type predicates: your own checks
+
+TypeScript can't know what your custom function proves. A **type predicate** in the return type tells it:
+
+```ts
+const CRANES = { Crane1: true, Crane2: true };
+
+function isCrane(value: string): value is "Crane1" | "Crane2" {
+  return Object.hasOwn(CRANES, value);
+}
+
+if (isCrane(input)) {
+  // input is "Crane1" | "Crane2"
+}
+```
+
+`value is X` means "if this returns true, treat `value` as `X`". TypeScript **trusts** you here. If the function body checks the wrong thing, the types will lie.
+
+Why `Object.hasOwn` and not `value in CRANES`? `in` also looks at inherited properties, so `"toString" in CRANES` is `true`. `hasOwn` only looks at the object's own keys.
+
+## `any` vs `unknown`
+
+Both mean "could be anything", but they behave opposite ways:
+
+- **`any`** switches checking off. You can call methods, read properties, pass it anywhere. TypeScript won't complain, even when it's wrong.
+- **`unknown`** allows nothing until you narrow it. TypeScript forces you to check first.
+
+```ts
+function useAny(x: any) {
+  x.foo.bar(); // compiles, may crash
+}
+
+function useUnknown(x: unknown) {
+  x.foo; // error: 'x' is of type 'unknown'
+  if (typeof x === "object" && x !== null && "foo" in x) {
+    x.foo; // fine now
+  }
+}
+```
+
+Prefer `unknown` for anything from outside your code: parsed JSON, caught errors, data from storage or the network.
+
+## Parsing untrusted data
+
+A value from `JSON.parse` could be anything, because the stored text could be old, edited or broken. Narrow step by step and build a fresh object from the parts you checked:
+
+```ts
+function parseRoleSelection(raw: string | null): RoleSelection | null {
+  if (raw === null) return null;
+
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+
+  if (typeof value !== "object" || value === null || !("role" in value)) {
+    return null;
+  }
+
+  if (value.role === "Supervisor") {
+    return { role: "Supervisor" };
+  }
+
+  if (value.role === "Operator" && "crane" in value) {
+    if (value.crane === null) return { role: "Operator", crane: null };
+    if (typeof value.crane === "string" && isCrane(value.crane)) {
+      return { role: "Operator", crane: value.crane };
+    }
+  }
+
+  return null;
+}
+```
+
+Returning **new** objects, instead of `value` itself, means extra fields in the stored data never leak into the app.
+
+## Narrowing doesn't survive callbacks
+
+```ts
+let current: string | null = getName();
+if (current !== null) {
+  setTimeout(() => {
+    current.length; // error: possibly null
+  });
+}
+```
+
+TypeScript can't know whether `current` changes before the callback runs, so the narrowing is dropped inside it. Copy it into a `const` first, which can never change:
+
+```ts
+const name = current;
+if (name !== null) {
+  setTimeout(() => name.length); // fine
+}
+```
+
+## Takeaway
+
+Narrowing turns a wide type into a specific one through checks TypeScript can follow: `typeof`, truthiness, equality, `instanceof`, `in`, discriminated unions and your own type predicates. Treat outside data as `unknown` and narrow it, rather than trusting it with `any` or `as`.
+
+## Open threads for next time
+
+- Assertion functions (`asserts value is X`), which throw instead of returning `false`.
+- Exhaustiveness checks with `never` (see Types from Values).

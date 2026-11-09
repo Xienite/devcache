@@ -1,0 +1,104 @@
+# Secure Randomness and Secure Contexts
+
+## Where I started
+
+I needed a random, unique ID for each tablet. `crypto.randomUUID()` worked perfectly on my laptop. Then I learned that on a tablet opening the app over the local network, it wouldn't exist at all. That led to two topics: what makes randomness "secure", and what a "secure context" is.
+
+## `Math.random` isn't enough
+
+```js
+Math.random(); // 0.7364...
+```
+
+`Math.random` is fast and fine for games or animations. But it comes from a **pseudo-random** algorithm designed for speed, not unpredictability. If someone sees enough outputs, the next ones can be predicted. And the language doesn't guarantee its quality at all.
+
+For anything that must be unguessable or reliably unique (IDs, tokens, keys), use the **Web Crypto API**, which draws from the operating system's secure random source.
+
+## `crypto.randomUUID()`
+
+```js
+crypto.randomUUID(); // "3b241101-e2bb-4255-8caf-4136c566a962"
+```
+
+A **UUID** (version 4) is 122 random bits written in a standard format. The chance of two ever colliding is so small that you can treat them as unique without checking.
+
+## `crypto.getRandomValues(array)`
+
+The lower-level tool. Give it a typed array, and it fills the array with random numbers and returns it:
+
+```js
+crypto.getRandomValues(new Uint8Array(16));
+// Uint8Array [201, 14, 77, 160, ...]
+```
+
+16 random bytes is 128 bits, slightly more randomness than a UUID. To turn bytes into text, convert each one to hex (see the Typed Arrays page):
+
+```js
+const bytes = crypto.getRandomValues(new Uint8Array(16));
+const id = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+// "c90e4da0..." , 32 characters
+```
+
+Limit: at most 65,536 bytes per call.
+
+## Secure contexts
+
+Some browser features only exist in a **secure context**. Roughly, that means the page was loaded:
+
+- over `https://`, or
+- from `localhost` or `127.0.0.1`, which count as secure because traffic never leaves the machine.
+
+`http://192.168.1.20:5173` is neither. On a page like that, these features are simply missing:
+
+- `crypto.randomUUID()` and `crypto.subtle` (hashing, encryption)
+- `navigator.clipboard`
+- service workers
+- camera and microphone access (`getUserMedia`)
+- many permission-based APIs, like geolocation
+
+`crypto.getRandomValues` is **not** on the list. It works everywhere.
+
+You can check where you are:
+
+```js
+window.isSecureContext; // true or false
+```
+
+## Why it bites during development
+
+Your laptop runs the app on `localhost`, which is secure, so everything works. The moment someone opens it from another device on the network, it's plain `http` on an IP address, and features disappear. Code that worked in every test fails only on the real device.
+
+## Feature detection
+
+Missing features are `undefined`, not broken, so check before calling:
+
+```ts
+function randomId(): string {
+  if (typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) =>
+    b.toString(16).padStart(2, "0"),
+  ).join("");
+}
+```
+
+`typeof` is safe on something that doesn't exist: it returns `"undefined"` instead of throwing.
+
+One catch in TypeScript: the built-in browser types declare `crypto.randomUUID` as always present. TypeScript won't warn you that it can be missing, and it won't require the check. Only a test that removes it, or a real insecure page, proves the fallback works.
+
+## Testing the fallback
+
+In Vitest, you can replace the global `crypto` for one test:
+
+```ts
+vi.stubGlobal("crypto", {
+  getRandomValues: crypto.getRandomValues.bind(crypto),
+});
+```
+
+The `.bind(crypto)` matters: built-in methods like `getRandomValues` check that they're called on the real `crypto` object (see Passing vs Calling a Function). Undo the stub afterwards with `vi.unstubAllGlobals()`.
+
+## Takeaway
+
+Use `crypto`, not `Math.random`, for anything that must be unguessable or unique. `randomUUID` is the convenient choice but only exists in secure contexts (HTTPS or localhost), while `getRandomValues` works everywhere. Test on the URL your users will really use, not just localhost.

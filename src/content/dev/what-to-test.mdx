@@ -1,0 +1,68 @@
+# Deciding What to Test
+
+## Where I started
+
+Halfway through writing tests for a proof of concept, I wondered whether a prototype needs this much testing at all. Then I was asked to test that a supervisor is **not** reset after an error, when the code obviously only resets operators. Why test something we already know?
+
+## Tests protect the future, not the present
+
+A test doesn't exist to confirm what's true today. It exists to tell you, loudly, when a later change makes it untrue.
+
+The supervisor example: a teammate tidies up the error handler and removes a check that looks redundant. Now a rejected supervisor gets turned into an operator and lands in the wrong screen. The types still compile. Nothing looks wrong in a quick review. Only a test notices.
+
+So the question isn't "is this obviously correct now?". It's "what would happen if someone broke it, and would we notice?"
+
+## Three questions
+
+A behaviour is worth a test when it is:
+
+1. **Easy to break without noticing.** Subtle conditions, code that looks redundant, logic spread over several places.
+2. **Costly when broken.** It loses data, blocks the user, or makes something unsafe.
+3. **Hard to check by hand.** Races, timing, network failures, rare states, reconnects, other devices.
+
+The more of these apply, the more a test is worth. A race condition that kicks an operator out mid-lift scores on all three. A button label scores on none.
+
+## What usually isn't worth a test
+
+- **What the type checker already guarantees.** If TypeScript proves a function only receives a `CraneId`, don't test it with other strings.
+- **Trivial code.** A component that only renders its props, a one-line getter.
+- **Library behaviour.** Don't test that React re-renders or that `fetch` sends requests. Test your use of them.
+- **What one look in the browser confirms**, if it's also unlikely to break silently, like a layout.
+
+## Test behaviour, not implementation
+
+Check what the code **does**, from the outside, not how it does it:
+
+```ts
+// behaviour: survives refactoring
+expect(screen.getByRole("button", { name: "Next" }).disabled).toBe(true);
+
+// implementation: breaks when you rename a state variable
+expect(component.state.bothValid).toBe(false);
+```
+
+A good test only fails when the behaviour changes. A test tied to internals fails on every refactor, and people learn to "fix" failing tests without reading them.
+
+## Different kinds of tests
+
+- **Unit tests**: one function, hook or component, with its dependencies faked. Fast and precise.
+- **Integration tests**: several real pieces together, like a component with its real hooks.
+- **End-to-end tests**: the real app in a real browser, against a real or test server. Slow, but closest to what users do.
+
+The usual advice is many fast unit tests, fewer integration tests, and a handful of end-to-end tests for the critical paths.
+
+## Coverage is not the goal
+
+Coverage tools report which lines ran during tests. It's useful for finding untested areas, but 100% doesn't mean the code is right: a line can run without any assertion checking its result. A few well-chosen tests beat many that only make the number go up.
+
+## For a prototype
+
+Testing less is reasonable when time is short and code may be thrown away. Spend it where the three questions say it matters most: tricky async logic, state that's hard to reach by hand, and anything that could put the user in a dead end. Skip the rest, and say so.
+
+## A habit: prove it can fail
+
+After writing a test, break the code it protects and confirm the test fails. A test that still passes against broken code protects nothing (see Unit Testing Basics with Vitest).
+
+## Takeaway
+
+Test what's easy to break silently, costly when broken, and hard to check by hand. Test behaviour from the outside, not internals. Tests aren't proof that today's code is right. They're how tomorrow's changes find out they broke something.

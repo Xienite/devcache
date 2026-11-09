@@ -1,0 +1,74 @@
+# The Event Loop
+
+Every language has behaviours that are important to understand upfront, otherwise you end up banging your head against a wall, convinced your logic is sound while some hidden technicality proves otherwise. The event loop is one of those for JavaScript.
+
+## The Call Stack
+
+Before the event loop, we need the call stack: the list of function calls JavaScript is currently working through, one at a time.
+
+```javascript
+console.log("A");
+console.log("B");
+```
+
+Nothing surprising here. Each call goes onto the stack in order, runs, and pops off. Output: `A`, then `B`.
+
+## Something Asynchronous
+
+Now introduce `setTimeout`:
+
+```javascript
+console.log("A");
+setTimeout(() => console.log("B"), 0);
+console.log("C");
+```
+
+Instinct says `A`, `B`, `C`. The actual output is **`A`, `C`, `B`**, even with a delay of `0`.
+
+Here's why. `setTimeout` itself is a function call, so it goes on the call stack like anything else, but its job isn't to run `console.log("B")` immediately. Its job is to hand that callback off to the browser, along with the delay, and then immediately return. Nothing about that hand-off blocks the stack.
+
+## Where Does It Go?
+
+The callback doesn't just float around, waiting. It goes through two stops before it ever runs:
+
+1. **The browser's timer**, which counts down the delay completely outside JavaScript. This is why `setTimeout(fn, 1000)` doesn't freeze anything: the counting happens elsewhere while your code keeps running.
+2. **The task queue**, where the callback lands the moment the timer finishes, waiting for a turn on the call stack.
+
+So for our snippet: `console.log("A")` runs, `setTimeout(...)` registers `console.log("B")` with the timer and returns instantly, `console.log("C")` runs. Only once all of that is done does `console.log("B")`, now sitting in the task queue, finally get its turn.
+
+## Why Not Just Slot It In Sooner?
+
+You might ask: why not run the queued callback the moment there's a gap, instead of waiting for the whole script to finish? Well, consider this:
+
+```javascript
+function transfer(account, amount) {
+  account.balance -= amount; // step 1
+  // <- suppose something else ran right here
+  account.log.push(`withdrew ${amount}`); // step 2
+}
+```
+
+If another callback could interrupt `transfer` between step 1 and step 2, it could read (or modify) `account` while it's only half-updated (balance already deducted, but not yet logged). Two pieces of code touching the same shared state mid-operation is exactly what a **race condition** is.
+
+JavaScript avoids this with a **run-to-completion** rule: once a piece of synchronous code starts running, it runs all the way to the end before anything else gets a turn. This includes however many nested functions call there may be. No interruptions, so no function is ever caught half-finished by something else. The cost is that a slow synchronous function blocks everything behind it. The benefit, on the other hand, is you never need locks to protect shared state.
+
+## The Event Loop, Finally
+
+Once the current code has fully run and the call stack is empty, the event loop does its one job: check the task queue, and if anything's waiting, move it onto the call stack, one task at a time, forever. That repeating "check, move, repeat" cycle is the loop itself.
+
+## Another Type of Task
+
+Now that we've finally met the event loop, there's something I must admit. The task queue we introduced earlier has an alternative, more appropriate name: the "macrotask queue". And as you may be able to already deduce, that means there's a sibling: the "microtask queue". 
+
+Let's see where this new queue gets involved:
+
+```Javascript
+console.log("A");
+setTimeout(() => console.log("B"), 0);
+Promise.resolve().then(() => console.log("C"));
+console.log("D");
+```
+
+As we've learned, every function call here is simply placed straight onto the call stack, with `console.log("B")` ending up on the macrotask queue. If we were to apply the same logic to the Promise now involved, we'd expect an output result of `A`, `D`, `B`, `C`. However, things work a little different with Promises.
+
+Promises work with the microtask queue instead. And more important to note, the microtask queue *takes priority* over the macrotask queue. This means, the microtask queue must be *completely emptied* before tackling the macrotasks, once again handling each task one by one. This includes any microtasks created during the execution of another microtask. Therefore, the output of the code snippet above would be: `A`, `D`, `C`, `B`. 

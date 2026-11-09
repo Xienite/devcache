@@ -1,0 +1,68 @@
+# Formatting and Linting
+
+## Where I started
+
+Both words sounded like "tools that complain about my code," and I treated them as one thing. They're not. They do different jobs, and mixing them up made the whole setup confusing at first.
+
+## Formatter: how the code looks
+
+A formatter rewrites the appearance of code (indentation, quotes, semicolons, line wrapping) and never changes what it does.
+
+```javascript
+// before
+export const   x = {a:1,
+ b:'two'}
+
+// after Prettier
+export const x = { a: 1, b: "two" };
+```
+
+The point isn't beauty. Nobody argues about style in review anymore, and a diff only shows real changes instead of someone's spacing habits.
+
+**Prettier** is the standard one. It has very few options on purpose. We also use `prettier-plugin-tailwindcss`, which sorts Tailwind class names into a fixed order.
+
+## Linter: what the code might get wrong
+
+A linter reads code without running it and flags patterns that are probably bugs: unused variables, `x === NaN` (always false), duplicate keys in an object. In React, calling a hook in the wrong place.
+
+```tsx
+function Panel({ open }: { open: boolean }) {
+  if (!open) return null;
+  const [count, setCount] = useState(0); // flagged: hook after a conditional return
+  return <button onClick={() => setCount(count + 1)}>{count}</button>;
+}
+```
+
+React needs hooks to run in the same order on every render, and an early `return` before a hook breaks that. The linter catches it before the app ever runs.
+
+We use **oxlint** (fast, written in Rust). **ESLint** is the older one most tutorials mention.
+
+## My question: how can a linter "reject" a commit?
+
+Every lint rule has a level in the config (`.oxlintrc.json`):
+
+- `error`: the linter exits with a failure code.
+- `warn`: it prints a message, but the exit code stays successful.
+
+Programs report success as `0` and anything else as failure. Git hooks and CI only look at that number. So "rejecting" just means a command returned non-zero, and the tool running it stops. That one idea (exit codes) explains most of how these tools connect.
+
+## Check versus write
+
+```bash
+npx prettier --write src    # rewrite files in place
+npx prettier --check src    # report unformatted files, change nothing
+```
+
+`--check` is what CI uses. A robot shouldn't edit my code, only tell me it's wrong.
+
+## Takeaway
+
+- A formatter is safe to run automatically, because it can't change behavior.
+- A linter usually only reports. Auto-fixes can change behavior, so a human should look first.
+
+That's why our hook runs Prettier with `--write` but runs oxlint with no fix flag.
+
+## Open threads for next time
+
+- CI only checks `src/` (`prettier --check src`), but the hook also formats files like `package.json`. Small gap, worth knowing about.
+- Backend has its own formatter story (`dotnet format`), not looked at yet.

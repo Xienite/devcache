@@ -1,0 +1,108 @@
+# Deferred Promises
+
+## Where I started
+
+I had to test what happens when a server's answer arrives **late**, after the user had already changed their mind. A mock that rejects straight away was no good: the rejection had to wait until I said so. That meant creating a promise and deciding from outside the promise when it settles.
+
+## How a promise normally gets settled
+
+```js
+const promise = new Promise((resolve, reject) => {
+  setTimeout(() => resolve("done"), 1000);
+});
+```
+
+The function you pass to `new Promise` is called the **executor**. Two things about it matter here:
+
+1. JavaScript runs the executor **immediately**, during `new Promise(...)`, not later.
+2. It receives two functions, `resolve` and `reject`. The promise stays **pending** until one of them is called.
+
+Usually you call them inside the executor, like the `setTimeout` above. But they're ordinary functions, so nothing stops you from saving them somewhere else.
+
+## Taking the controls out
+
+```js
+let resolve;
+let reject;
+
+const promise = new Promise((res, rej) => {
+  resolve = res;
+  reject = rej;
+});
+
+// any time later, from anywhere:
+resolve("done");
+```
+
+This is called a **deferred**: a promise, plus the functions that settle it, kept separately. The executor runs straight away, so `resolve` and `reject` are already assigned by the next line.
+
+It works because the executor is a closure over the outer variables (see the Closures page).
+
+## In TypeScript
+
+TypeScript can't see that the executor runs immediately. It only sees the assignment inside a callback, so it complains that the variable might be used before it's assigned. A definite assignment assertion says "trust me":
+
+```ts
+let reject!: (error: Error) => void;
+
+const promise = new Promise<void>((_resolve, rej) => {
+  reject = rej;
+});
+```
+
+The `!` after the name is that assertion (see the Type Assertions page). `_resolve` starts with an underscore by convention, to show it's deliberately unused.
+
+## The modern version: `Promise.withResolvers`
+
+Newer JavaScript (ES2024) has this built in:
+
+```js
+const { promise, resolve, reject } = Promise.withResolvers();
+```
+
+Same idea, no outer variables. TypeScript only knows about it if your `lib` setting includes ES2024 or later.
+
+## Where it's useful
+
+### Tests that control timing
+
+```ts
+let rejectRegistration!: (error: Error) => void;
+registerDevice.mockImplementationOnce(
+  () => new Promise<void>((_resolve, reject) => {
+    rejectRegistration = reject;
+  }),
+);
+
+renderTheHook();           // the call starts and stays pending
+changeTheSelection();      // the user moves on
+rejectRegistration(new Error("taken")); // only now does the old call fail
+```
+
+Now the test decides exactly when the answer arrives, which is how you test race conditions (see Testing Asynchronous Code).
+
+### Turning callbacks or events into a promise
+
+```js
+function waitForClick(button) {
+  return new Promise((resolve) => {
+    button.addEventListener("click", resolve, { once: true });
+  });
+}
+
+await waitForClick(okButton);
+```
+
+### Something else finishes it
+
+A queue that hands out promises and resolves them as jobs complete, or a "wait until the connection is ready" promise resolved from a connection event.
+
+## Pitfalls
+
+- **Only the first call counts.** After a promise is settled, further `resolve` or `reject` calls are ignored silently.
+- **Forgetting to settle it** leaves code awaiting it stuck forever, with no error.
+- **Don't wrap existing promises.** If you already have a promise, chain on it. Creating a deferred around it only adds places to forget a `reject`.
+
+## Takeaway
+
+The executor runs immediately and hands you `resolve` and `reject`. Store them, and you can settle the promise later from anywhere. That's a deferred promise, and it's the tool for "the answer arrives when I say so".

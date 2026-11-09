@@ -1,0 +1,86 @@
+# Controlled vs Uncontrolled Components
+
+## Where I started
+
+A setup wizard was shown in a dialog that must not close by accident: no closing with Escape, no closing by tapping outside. The fix was one line, and it surprised me:
+
+```tsx
+<Dialog open>
+```
+
+Passing `open` with no way for it to change locks the dialog open. To understand why that works, I had to understand **who owns the state** of a component.
+
+## Two ways to own state
+
+**Uncontrolled:** the component keeps its own state. You can set a starting value, and then it manages itself.
+
+```tsx
+<input defaultValue="Ada" />
+```
+
+The input remembers what the user types. React doesn't know the current text unless you read it from the DOM.
+
+**Controlled:** **you** own the state, and the component only displays what you give it. When the user tries to change it, the component asks you, through a callback.
+
+```tsx
+const [name, setName] = useState("Ada");
+<input value={name} onChange={(e) => setName(e.target.value)} />
+```
+
+Every keystroke calls `onChange`, you update state, React re-renders, and the input shows the new `value`. The input never changes on its own.
+
+## The naming pattern
+
+Most React components follow the same convention:
+
+- **`value` and `onChange`** (or `open` and `onOpenChange`, `checked` and `onCheckedChange`): controlled.
+- **`defaultValue`** (or `defaultOpen`, `defaultChecked`): uncontrolled with a starting value.
+
+## Controlled without a handler
+
+What if you pass `value` but no `onChange`?
+
+```tsx
+<input value="Ada" />
+```
+
+The user types, the input asks for a change, nobody answers, and React renders `"Ada"` again. The input is **frozen**. React warns about it, because usually it's a mistake: use `readOnly` if you meant it, or `defaultValue` if you wanted it editable.
+
+That's exactly the dialog trick:
+
+```tsx
+<Dialog open>
+```
+
+When the user presses Escape, the dialog calls `onOpenChange(false)`. There is no `onOpenChange`, so nothing changes, and `open` stays `true`. The dialog can only close when your code stops rendering it, for example when the wizard finishes. For a dialog, that's intentional, and no warning appears.
+
+## Choosing
+
+**Use controlled when you need to:**
+
+- react to every change (validation as you type, enabling a button)
+- change the value from code (reset a form, open a dialog from elsewhere)
+- keep two components in sync
+- restrict changes, like the locked dialog
+
+**Use uncontrolled when:**
+
+- you only need the value at the end, for example on submit
+- you want the least code and fewest re-renders
+
+## The switching warning
+
+```tsx
+const [name, setName] = useState(); // undefined at first
+<input value={name} onChange={(e) => setName(e.target.value)} />
+```
+
+The first render passes `value={undefined}`, which React treats as uncontrolled. After the first keystroke, it's a string, so the input becomes controlled. React warns that a component is changing from uncontrolled to controlled. Give controlled values a real starting value, such as `useState("")`.
+
+## Building your own
+
+When you write a reusable component, you can support both modes. The common pattern: if the parent passes `value`, use it. Otherwise keep internal state, starting from `defaultValue`, and call `onChange` either way. Libraries like Radix do this for every component, which is why `Dialog` accepts both `open` and `defaultOpen`.
+
+## Takeaway
+
+Uncontrolled components own their state. Controlled components display what you give them and ask you for changes through a callback. Passing the value without a handler freezes the component, which is a mistake for inputs but a useful trick for a dialog that must not close.

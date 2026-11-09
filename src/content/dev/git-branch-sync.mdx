@@ -1,0 +1,73 @@
+# Keeping a Branch in Sync
+
+## Where I started
+
+The situation: I branch off `develop`, build a feature, and meanwhile someone else's feature lands in `develop` first. When mine is done, do I have to bring their changes in, or can I just open the PR?
+
+```
+develop:  A---B---C
+           \
+feature:    F1--F2
+```
+
+I branched at `A`. `B` and `C` came after.
+
+## Can I just open the PR?
+
+Yes. Git doesn't require a branch to be up to date. If the changes touch different files, the merge works. Two things can go wrong:
+
+- **Textual conflict:** both branches edited the same lines. GitHub flags the PR and someone resolves it.
+- **Semantic conflict:** the files merge cleanly but the result is broken. `develop` renamed a function and my branch still calls the old name. Git sees no overlap, so there's no warning. The build breaks after the merge.
+
+The second one is the dangerous one, and the reason teams sync first.
+
+## Option 1: merge develop into my branch
+
+```
+develop:  A---B---C--------M2
+           \             /
+feature:    F1--F2--M1--+
+```
+
+`M1` brings `B` and `C` into my branch. History stays as it really happened, and it's safe on a shared branch.
+
+## My question: doesn't M1 look like develop merging into itself?
+
+It looks that way in the log, but it isn't. `M1` lives on the side branch and only reaches `develop` through my PR's merge commit `M2`. It's noise, not a loop. With squash merging the noise disappears, because the whole branch collapses into one commit. We don't squash, so it stays, and a busy repo collects a lot of "Merge develop into feature" commits.
+
+## Option 2: rebase onto develop
+
+```
+develop:  A---B---C
+                   \
+feature:            F1'--F2'
+```
+
+Rebase replays my commits on top of the latest `develop`. Straight-line history, no sync commit. The price: replayed commits get new hashes (`F1'`, `F2'`), so pushing needs a force push:
+
+```bash
+git push --force-with-lease
+```
+
+`--force-with-lease` refuses to overwrite remote work I haven't seen, which makes it far safer than plain `--force`. Rule of thumb: only rebase a branch I'm the sole author of.
+
+## Option 3: don't sync
+
+If nothing conflicts and CI is green, skip it. The only thing added to `develop` is the PR's own merge commit. Least noisy, and fine for small changes.
+
+## Takeaway
+
+- Solo branch, want clean history: rebase.
+- Shared branch, or want the safe option: merge `develop` in.
+- Nothing conflicts and CI passes: don't sync.
+
+More important than which one: the whole team picks one and writes it in CONTRIBUTING.md. Mixed habits are what make history messy.
+
+## The rollout lesson
+
+The first draft of the rollout instructions said "run `npm run format` before merging develop." That can't work: the other branch had no Prettier yet, so the command didn't exist. When a change adds tooling, the order for people on older branches is: merge `develop`, run `npm install`, then use the new command.
+
+## Open threads for next time
+
+- `git bisect` and `git log --first-parent`: how much do merge commits really hurt?
+- What happens to a PR's CI result after its target branch moves on?

@@ -1,0 +1,143 @@
+# Short-Circuit Operators
+
+## Where I started
+
+I found this in a form component and couldn't read it:
+
+```ts
+const describedBy =
+  [description && descriptionId, error && errorId]
+    .filter(Boolean)
+    .join(" ") || undefined;
+```
+
+I thought `&&` and `||` always produce `true` or `false`. They don't, and that's what makes lines like this work.
+
+## The rule
+
+`&&`, `||` and `??` return **one of their two operands**, not a boolean.
+
+- **`a && b`**: if `a` is falsy, return `a`. Otherwise return `b`.
+- **`a || b`**: if `a` is truthy, return `a`. Otherwise return `b`.
+- **`a ?? b`**: if `a` is `null` or `undefined`, return `b`. Otherwise return `a`.
+
+```js
+"hi" && 42;   // 42
+"" && 42;     // ""
+"hi" || 42;   // "hi"
+"" || 42;     // 42
+0 ?? 42;      // 0
+null ?? 42;   // 42
+```
+
+They're called **short-circuit** operators because they stop as soon as the answer is known. In `a && b`, if `a` is falsy, `b` is never even evaluated. That matters when `b` is a function call.
+
+## Truthy and falsy
+
+"Falsy" means it counts as false in a condition. There are only a few falsy values:
+
+`false`, `0`, `-0`, `0n`, `""`, `null`, `undefined`, `NaN`
+
+Everything else is truthy, including `"0"`, `"false"`, `[]` and empty objects.
+
+## `||` vs `??`
+
+Both give a fallback, but they disagree about what needs one:
+
+```js
+const volume = settings.volume || 50;
+const volume = settings.volume ?? 50;
+```
+
+If the user set the volume to `0`, `||` treats `0` as falsy and replaces it with `50`. `??` only replaces `null` and `undefined`, so `0` stays `0`. Use `??` for defaults whenever `0`, `""` or `false` are valid values.
+
+## Taking the line apart
+
+```ts
+[description && descriptionId, error && errorId]
+```
+
+`description && descriptionId` means "the id if there's a description, otherwise whatever falsy thing `description` was". With a description but no error, the array is `["field-1-description", undefined]`.
+
+```ts
+.filter(Boolean)
+```
+
+`Boolean` is a function that turns any value into `true` or `false`. Passing it to `filter` keeps only truthy items, so `undefined` and `""` are removed: `["field-1-description"]`.
+
+```ts
+.join(" ")
+```
+
+Joins what's left with spaces. With both ids it becomes `"field-1-description field-1-error"`. With neither, the array is empty and `join` returns `""`.
+
+```ts
+|| undefined
+```
+
+`""` is falsy, so an empty result becomes `undefined`. In React, an attribute set to `undefined` is left out of the HTML entirely, while `""` would render an empty attribute.
+
+## In React: `cond && <Thing />`
+
+```tsx
+{error && <p role="alert">{error}</p>}
+```
+
+If `error` is falsy, the expression is `error` itself, and React renders nothing for `false`, `null`, `undefined` and `""`. If it's truthy, the expression is the element.
+
+The trap is **numbers**:
+
+```tsx
+{items.length && <List items={items} />}
+```
+
+With an empty array, `items.length` is `0`, the expression returns `0`, and React **renders `0`** on the page. React skips most falsy values but not numbers. Make the condition a real boolean:
+
+```tsx
+{items.length > 0 && <List items={items} />}
+```
+
+## `&&` isn't "and also"
+
+Because `&&` returns **one** operand, it can't pass two values along:
+
+```ts
+Math.max(a && b); // Math.max(b) if a is truthy, so the max of one number
+Math.max(a, b);   // what was meant: two arguments, separated by a comma
+```
+
+TypeScript doesn't flag it, since the expression is valid. It just quietly compares nothing.
+
+## Optional chaining joins in
+
+`?.` short-circuits too: `a?.b` gives `undefined` instead of throwing when `a` is `null` or `undefined`. It pairs naturally with `??`:
+
+```ts
+const role = selection?.role ?? "none";
+```
+
+It matters most for method calls. `undefined` has no methods, so calling one throws:
+
+| Expression (`x` is `undefined`) | Result |
+|---|---|
+| `x.toString()` | throws `TypeError` |
+| `String(x)` | `"undefined"` (a string) |
+| `` `${x}` `` | `"undefined"` (a string) |
+| `x?.toString()` | `undefined` (the value) |
+| `x?.toString() ?? "–"` | `"–"` |
+
+## Assignment versions
+
+`a ||= b`, `a &&= b` and `a ??= b` assign only when the operator would pick `b`:
+
+```js
+options.retries ??= 3; // set it only if it's null or undefined
+```
+
+## Takeaway
+
+`&&`, `||` and `??` hand back one of their operands, and stop evaluating as soon as the answer is known. `||` replaces anything falsy, `??` only replaces `null` and `undefined`. In JSX, keep `&&` conditions boolean so a `0` never ends up on screen.
+
+## Open threads for next time
+
+- Mixing `??` with `&&` or `||` needs parentheses, or it's a syntax error. Why did the language designers decide that?

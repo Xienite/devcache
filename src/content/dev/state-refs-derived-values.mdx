@@ -1,0 +1,161 @@
+# State, Refs and Derived Values
+
+## Where I started
+
+I wanted to remember an error inside a component, so I wrote what I'd write anywhere else in JavaScript:
+
+```tsx
+let error = null;
+connection.register(role).catch((e) => {
+  error = e;
+});
+```
+
+The error never showed up. Meanwhile, a plain helper function elsewhere used exactly this kind of `let` and worked fine. The difference is where the code runs, and it led to a simple question for every value: **where should this live?**
+
+## Why a `let` in a component fails
+
+A component is a function that React calls **again on every render**. Two things go wrong with a `let`:
+
+1. **Assigning it doesn't re-render.** The `.catch` runs after the render has finished. Changing a variable doesn't tell React anything, so the screen stays the same.
+2. **It's reset every render.** Even if something else causes a render, the function runs from the top and `error` starts as `null` again.
+
+A plain function that runs once (not a component) doesn't have either problem, so a `let` there is fine.
+
+## The four options
+
+### `useState`: shown on screen and changes
+
+```tsx
+const [error, setError] = useState<Error | undefined>(undefined);
+```
+
+React keeps the value between renders, and calling `setError` schedules a new render with the new value. Use it for anything the user should **see change**.
+
+#### Lazy initial state
+
+The value passed to `useState` is only **used** on the first render. On every later render React ignores it and returns the stored state. But the component function still runs top to bottom each time, and JS evaluates a function's arguments **before** calling it:
+
+```tsx
+const [colors, setColors] = useState(readColors(tokens));
+// readColors runs on EVERY render; React throws the result away after the first
+```
+
+That's wasted work when the initial value is expensive, here a `getComputedStyle` call. The fix is to pass a **function** instead of a value. `useState` treats a function argument specially: it calls it once, on the first render, and uses its return value as the initial state:
+
+```tsx
+const [colors, setColors] = useState(() => readColors(tokens));
+// the arrow function is created every render, but only called on the first
+```
+
+If the initialiser takes no arguments, the function can be passed directly, without a wrapper:
+
+```tsx
+const [colors, setColors] = useState(readColors); // fine: React calls readColors() once
+```
+
+This is the same rule as in Passing vs Calling a Function: `readColors` is the function, `readColors(tokens)` is its result, right now. The wrapper is needed as soon as I have to supply an argument.
+
+Two details:
+
+- The initialiser must be **pure**: no side effects, the same result for the same input. In development, Strict Mode calls it twice to catch impure ones.
+- A consequence of "a function means initialiser": to store a function **in** state, it must be wrapped, `useState(() => myFn)`. Otherwise React calls `myFn` and stores its result. The same applies to the setter, where `setX(fn)` is treated as an updater.
+
+### A plain `const`: calculated from other values
+
+```tsx
+const [firstName, setFirstName] = useState("");
+const [lastName, setLastName] = useState("");
+const fullName = `${firstName} ${lastName}`;
+```
+
+`fullName` is recalculated every render, so it's always correct. Don't store it in state too. Two pieces of state that must agree **will** get out of sync eventually. This is called **derived state**.
+
+A more interesting example: a form field shows "verified" only while the typed text still equals the ID that was verified.
+
+```tsx
+const status = draft === submitted.id ? submitted.status : "idle";
+```
+
+No "reset the status when the user edits" code is needed. Editing makes the two differ, so the status is `idle` automatically, and typing the old ID back restores it.
+
+### `useRef`: remembered, but not shown
+
+```tsx
+const intervalId = useRef<number | null>(null);
+intervalId.current = window.setInterval(tick, 1000);
+```
+
+A ref is a box that stays the same object for the component's whole life. You read and write `.current` freely, and **writing it doesn't re-render**. Use it for timer ids, DOM elements, or values a callback needs but the screen doesn't show.
+
+### A closure `let`: inside a plain function or one effect run
+
+```ts
+function startPolling() {
+  let lastError: Error | undefined;
+  // ...
+}
+```
+
+Outside of rendering, a `let` is just a normal variable. It's the right tool inside helpers that aren't components, or for a flag that belongs to one run of an effect (see Async Race Conditions).
+
+It also works for state **shared by several functions inside one effect**, like a message handler and an animation loop:
+
+```ts
+useEffect(() => {
+  let arrivedAt = 0; // declared here: both functions below see it
+
+  const stop = subscribe((message) => {
+    arrivedAt = performance.now(); // assigned when a message arrives
+  });
+
+  let frame = requestAnimationFrame(function loop(now) {
+    const age = (now - arrivedAt) / 1000; // read every frame
+    frame = requestAnimationFrame(loop);
+  });
+
+  return () => { stop(); cancelAnimationFrame(frame); };
+}, []);
+```
+
+**Declare** the variable where every function that needs it can see it. **Assign** it where the event happens. Declared inside the handler, it would start fresh on every message, and the loop couldn't see it at all.
+
+A ref would also work, but isn't needed: nothing outside this effect (render, another effect, an event handler) touches these values. And when the effect re-runs (Strict Mode, a reconnect), the `let`s start fresh, which is usually what you want.
+
+## How to choose
+
+Ask these in order:
+
+1. **Can it be calculated from props or state?** Calculate it, with a `const`.
+2. **Does the screen need to change when it changes?** `useState`.
+3. **Does it need to survive between renders, without affecting the screen?** `useRef`.
+4. **Is it only needed during one function call or one effect run?** A local variable.
+
+## Refs during render
+
+Reading or writing `ref.current` **while rendering** is discouraged, and the React lint rules flag it:
+
+```tsx
+const latest = useRef(value);
+latest.current = value; // flagged: written during render
+```
+
+React may render a component several times before showing the result, or throw a render away. Code that depends on refs during render can then behave inconsistently. Update refs in effects or event handlers instead:
+
+```tsx
+const latest = useRef(value);
+useEffect(() => {
+  latest.current = value;
+}, [value]);
+```
+
+This "latest value" ref is a common pattern: an async callback that runs later reads `latest.current` and always gets the newest value, without becoming a dependency that re-runs an effect. React 19.2 added `useEffectEvent` as the official tool for the same need.
+
+## Takeaway
+
+Calculate what you can. Put what the user sees in state, and pass an initialiser function when the starting value is expensive. Put what you only need to remember in a ref. Use plain variables for things that live inside one function call. A `let` in a component body forgets its value and never updates the screen.
+
+## Open threads for next time
+
+- `useMemo`, for derived values that are expensive to calculate.
+- `useEffectEvent` in practice.

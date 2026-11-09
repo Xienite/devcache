@@ -1,0 +1,145 @@
+# Mocks, Spies and Stubs
+
+## Where I started
+
+To test a hook that talks to a server, I couldn't use a real server. I needed something that pretends to be the connection, reports what was called, and fails on request. Testing tools have a whole vocabulary for this.
+
+## The words
+
+They're often used loosely, but the ideas are distinct:
+
+- **Fake**: a working but simplified replacement, like an in-memory connection object instead of a real network connection.
+- **Stub**: returns fixed answers. "When asked, say this."
+- **Spy**: records how it was called: how often, with which arguments.
+- **Mock**: a stand-in that does both, and that you make claims about afterwards.
+
+In Vitest, `vi.fn()` does all of it, so in practice people just call them mocks.
+
+## `vi.fn()`: a function you control
+
+```ts
+const onSave = vi.fn();
+
+render(<Form onSave={onSave} />);
+fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+expect(onSave).toHaveBeenCalledOnce();
+expect(onSave).toHaveBeenCalledWith({ name: "Ada" });
+```
+
+Call-related matchers:
+
+- `toHaveBeenCalled()`, `toHaveBeenCalledOnce()`, `toHaveBeenCalledTimes(n)`
+- `toHaveBeenCalledWith(...args)`: **any** call had these arguments.
+- `toHaveBeenLastCalledWith(...args)`: the **latest** call had them.
+- `.not.toHaveBeenCalled()`
+
+The raw data is on `mock.calls`: an array with one entry per call, each an array of arguments.
+
+## Deciding what it returns
+
+```ts
+const getName = vi.fn(() => "Ada");      // always runs this implementation
+
+getName.mockReturnValue("Grace");        // always return this
+getName.mockReturnValueOnce("Linus");    // only the next call
+
+fetchUser.mockResolvedValue(user);       // returns Promise.resolve(user)
+fetchUser.mockRejectedValueOnce(new Error("offline")); // next call rejects
+
+register.mockImplementationOnce(() => new Promise(() => {})); // next call never settles
+```
+
+The **`Once`** versions are queued up and used in order, then the mock falls back to its normal behaviour. That's how you make one specific call fail, for example the second registration after a reconnect, while the first one succeeds.
+
+`mockResolvedValue` and `mockRejectedValue` are shortcuts for promise-returning functions. `mockImplementation` is the general version, for when you need full control, such as a promise you settle yourself (see Deferred Promises).
+
+## TypeScript and `vi.mocked`
+
+If a mock lives inside a typed object, TypeScript only sees the original type:
+
+```ts
+const connection: LiftConnection = { registerDevice: vi.fn(), /* ... */ };
+connection.registerDevice.mockRejectedValueOnce(...); // error: not a mock type
+```
+
+`vi.mocked(...)` tells TypeScript "this is a mock". It doesn't change anything at runtime:
+
+```ts
+vi.mocked(connection.registerDevice).mockRejectedValueOnce(new Error("taken"));
+```
+
+## Cleaning up between tests
+
+- **`mockClear()`**: forget recorded calls.
+- **`mockReset()`**: also forget any behaviour set with `mockReturnValue` and friends.
+- **`mockRestore()`**: for spies on real objects, put the original method back.
+
+`vi.clearAllMocks()`, `vi.resetAllMocks()` and `vi.restoreAllMocks()` do it for every mock. Or simply create fresh mocks in each test.
+
+## `vi.spyOn`: watch a real method
+
+```ts
+const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+doSomething();
+expect(warn).toHaveBeenCalled();
+warn.mockRestore();
+```
+
+Replaces a method on an existing object, so you can check calls or silence it, and restore the original afterwards.
+
+## `vi.mock`: replace a whole module
+
+```ts
+vi.mock("./hooks/use-crane-pairing", () => ({
+  useCranePairing: () => ({ cranes: FAKE_CRANES, setCraneId: vi.fn() }),
+}));
+```
+
+Every import of that module, in the code under test, gets your version. Useful when a component calls a hook you want to control.
+
+The catch: **`vi.mock` is moved to the top of the file** before anything else runs, so imports see the mock. That means its factory can't use variables declared normally in the file, because they don't exist yet. Declare them with `vi.hoisted`, which is moved up too:
+
+```ts
+const { pairing } = vi.hoisted(() => ({
+  pairing: { cranes: { /* ... */ }, setCraneId: vi.fn() },
+}));
+
+vi.mock("./hooks/use-crane-pairing", () => ({
+  useCranePairing: () => pairing,
+}));
+
+// each test can now change pairing.cranes before rendering
+```
+
+## `vi.stubGlobal`: replace a global
+
+```ts
+vi.stubGlobal("crypto", {
+  getRandomValues: crypto.getRandomValues.bind(crypto),
+});
+// ... test the code path without crypto.randomUUID ...
+vi.unstubAllGlobals(); // usually in afterEach
+```
+
+Replaces something on `globalThis` (`crypto`, `fetch`, `navigator`) for the current test. Always undo it, or the fake leaks into later tests. `vi.stubEnv` does the same for environment variables.
+
+## Design makes mocking easy
+
+The easiest code to test receives its dependencies instead of creating them. If a component gets its connection from context (or a prop), a test can pass a fake one:
+
+```tsx
+<ConnectionContext.Provider value={fakeConnection}>
+  <ComponentUnderTest />
+</ConnectionContext.Provider>
+```
+
+If it created the connection itself with `new HubService()`, you'd have to mock the whole module. When something is hard to mock, that often points to a design that's hard to change too.
+
+## Don't mock everything
+
+Every mock is an assumption about how the real thing behaves. Mock the boundaries (network, time, randomness, storage), and use the real code for the rest. A test where everything is mocked only proves your mocks agree with each other.
+
+## Takeaway
+
+`vi.fn()` records calls and returns whatever you tell it, with `Once` versions for single calls and shortcuts for promises. `vi.mock` replaces modules (with `vi.hoisted` for shared variables), `vi.spyOn` watches real methods, and `vi.stubGlobal` replaces globals. Clean up after each test, and mock only at the boundaries.

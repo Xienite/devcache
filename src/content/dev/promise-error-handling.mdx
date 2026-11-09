@@ -1,0 +1,118 @@
+# Error Handling with Promises
+
+## Where I started
+
+A tablet asked the server to claim a crane, and the server refused because another tablet already had it. My code only did this:
+
+```ts
+connection.registerDevice(role).catch((e) => console.warn(e));
+```
+
+The error was logged, nobody saw it, and the confirm button kept spinning forever. Handling the error properly raised three questions: how does a server error reach my code, what type is `e`, and what should the user see?
+
+## Two ways to catch
+
+```ts
+// 1. .catch on the promise
+doWork()
+  .then((result) => use(result))
+  .catch((e) => handle(e));
+
+// 2. try/catch with await
+try {
+  const result = await doWork();
+  use(result);
+} catch (e) {
+  handle(e);
+}
+```
+
+They do the same job. `.catch` catches anything thrown or rejected earlier in the chain. `try`/`catch` catches anything thrown inside the `try` block, and an `await` on a rejected promise counts as a throw.
+
+`.catch` doesn't stop the program. It returns a new promise, so the chain continues afterwards as if nothing went wrong, unless the handler throws again.
+
+## What happens if nobody catches
+
+A rejected promise with no handler becomes an **unhandled rejection**. The browser logs it in red in the console, and Node can stop the whole process. Every promise you start should either be awaited by something that handles errors, or get a `.catch`.
+
+## What is `e`?
+
+JavaScript lets you throw or reject with **anything**, not only errors:
+
+```js
+throw "oops";           // a string
+Promise.reject(42);     // a number
+throw { code: 7 };      // a plain object
+```
+
+So TypeScript can't promise that a caught value is an `Error`:
+
+- In `catch (e)`, with `strict` on, `e` is **`unknown`**. You must check it before using it.
+- In `.catch((e) => ...)`, `e` is **`any`** for historical reasons. TypeScript lets you do anything with it, so it won't stop you from reading `e.message` on a string.
+
+The safe pattern is to narrow with `instanceof`:
+
+```ts
+.catch((e) => {
+  const error = e instanceof Error ? e : new Error(String(e));
+  setError(error);
+});
+```
+
+If it's an `Error`, keep it. Otherwise wrap whatever it is in a real `Error`, so the rest of the code can always rely on `.message`. (See the Type Narrowing page.)
+
+## How a server error reaches the browser
+
+The browser doesn't receive the server's exception object. It receives **text**, and a client library turns that text into a new `Error`.
+
+With SignalR, for example, a server method that throws a `HubException("Crane already claimed.")` reaches the client as:
+
+```
+Error: An unexpected error occurred invoking 'RegisterDevice' on the server.
+HubException: Crane already claimed.
+```
+
+Two consequences:
+
+- The message is **wrapped** in extra text. Checking `e.message === "Crane already claimed."` fails, and checking with `includes` breaks the day someone rewords the server message. If the client needs to react differently to different failures, agree on something stable with the backend: an error code, a result object, or a separate event.
+- **Not every failure comes from the server.** If the connection drops mid-call, the client library rejects with its own error. Code should handle "the specific failure I expect" and "anything else" separately.
+
+## Developer messages vs user messages
+
+`e.message` is written for developers. It's usually English, often technical, and not translated. Don't put it on screen.
+
+```ts
+.catch((e) => {
+  console.warn(e);                 // the details, for debugging
+  setError(t("claimFailed"));      // a message written for the user
+});
+```
+
+A good user-facing message says what happened and what to do next: "Couldn't claim this crane. It may have just been taken. Choose a crane again."
+
+## Recovering, not just reporting
+
+Showing a message is only half of it. The app should also end up in a state where the user can continue. In the crane example, the stored choice had to be cleared, otherwise a reload would retry the same crane and spin forever again.
+
+Ask: after this error, what does the user do next, and does the app's state allow it?
+
+## Adding context to an error
+
+When rethrowing, `cause` keeps the original error attached:
+
+```ts
+try {
+  await save();
+} catch (e) {
+  throw new Error("Saving the calibration failed", { cause: e });
+}
+```
+
+## Takeaway
+
+A caught value can be anything, so narrow it before trusting it. Server errors arrive as wrapped text, so don't build logic on their exact wording. Log the technical error for developers, show your own message to users, and make sure the app's state lets the user try again.
+
+## Open threads for next time
+
+- `Promise.allSettled` for running several requests where some may fail.
+- Global handlers: `window.addEventListener("unhandledrejection", ...)` for reporting errors nobody caught.
